@@ -56,7 +56,7 @@ describe("binary", () => {
 		const env = { PI_UNREAL_STATE_DIR: state, PATH: "/nonexistent" };
 		const { fetchImpl, requested } = fakeRelease();
 		const bin = await resolveRunner(env, undefined, fetchImpl);
-		expect(bin).toBe(path.join(state, "bin", RUNNER_VERSION, "unreal-agent-runner"));
+		expect(bin).toBe(path.join(state, "bin", RUNNER_VERSION, platformTag(), "unreal-agent-runner"));
 		expect(fs.statSync(bin).mode & 0o111).toBeTruthy();
 		expect(Bun.spawnSync([bin]).stdout.toString().trim()).toBe("fake-runner");
 		const before = requested.length;
@@ -70,6 +70,47 @@ describe("binary", () => {
 		await expect(resolveRunner({ PI_UNREAL_STATE_DIR: state, PATH: "/nonexistent" }, undefined, fetchImpl)).rejects.toThrow(
 			"checksum mismatch",
 		);
-		expect(fs.existsSync(path.join(state, "bin", RUNNER_VERSION, "unreal-agent-runner"))).toBe(false);
+		expect(fs.existsSync(path.join(state, "bin", RUNNER_VERSION, platformTag(), "unreal-agent-runner"))).toBe(false);
+	});
+
+	test("concurrent resolves share one download", async () => {
+		const state = tmpdir();
+		const env = { PI_UNREAL_STATE_DIR: state, PATH: "/nonexistent" };
+		const { fetchImpl, requested } = fakeRelease();
+		const [a, b, c] = await Promise.all([resolveRunner(env, undefined, fetchImpl), resolveRunner(env, undefined, fetchImpl), resolveRunner(env, undefined, fetchImpl)]);
+		expect(new Set([a, b, c]).size).toBe(1);
+		expect(requested.filter(u => u.endsWith(".tar.gz")).length).toBe(1);
+	});
+
+	test("a corrupted cached binary is detected and downloaded again", async () => {
+		const state = tmpdir();
+		const env = { PI_UNREAL_STATE_DIR: state, PATH: "/nonexistent" };
+		const { fetchImpl, requested } = fakeRelease();
+		const bin = await resolveRunner(env, undefined, fetchImpl);
+		fs.writeFileSync(bin, "#!/bin/sh\necho tampered\n");
+		const downloadsBefore = requested.filter(u => u.endsWith(".tar.gz")).length;
+		expect(await resolveRunner(env, undefined, fetchImpl)).toBe(bin);
+		expect(requested.filter(u => u.endsWith(".tar.gz")).length).toBe(downloadsBefore + 1);
+		expect(Bun.spawnSync([bin]).stdout.toString().trim()).toBe("fake-runner");
+	});
+
+	test("a cached binary that lost its executable bit is replaced", async () => {
+		const state = tmpdir();
+		const env = { PI_UNREAL_STATE_DIR: state, PATH: "/nonexistent" };
+		const { fetchImpl } = fakeRelease();
+		const bin = await resolveRunner(env, undefined, fetchImpl);
+		fs.chmodSync(bin, 0o644);
+		expect(await resolveRunner(env, undefined, fetchImpl)).toBe(bin);
+		expect(fs.statSync(bin).mode & 0o111).toBeTruthy();
+	});
+
+	test("concurrent resolves for different state dirs do not share a download", async () => {
+		const { fetchImpl } = fakeRelease();
+		const [a, b] = await Promise.all([
+			resolveRunner({ PI_UNREAL_STATE_DIR: tmpdir(), PATH: "/nonexistent" }, undefined, fetchImpl),
+			resolveRunner({ PI_UNREAL_STATE_DIR: tmpdir(), PATH: "/nonexistent" }, undefined, fetchImpl),
+		]);
+		expect(a).not.toBe(b);
+		expect(fs.existsSync(a) && fs.existsSync(b)).toBe(true);
 	});
 });

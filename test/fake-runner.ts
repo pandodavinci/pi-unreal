@@ -1,7 +1,7 @@
 /**
  * Test double for unreal-agent-runner. Emits real-shaped JSONL items.
  * Mode comes from FAKE_MODE:
- *   ok | slow | crash | error | garbage | truncated | op-failures | bad-shape | big-stderr | partials
+ *   ok | echo | slow | crash | error | garbage | truncated | op-failures | bad-shape | big-stderr | partials
  *   stubborn      ignores SIGINT (forces the bridge's SIGKILL path)
  *   orphan-crash  starts a descendant in its own process group (like Unreal's Bash), then crashes
  *   orphan-slow   starts such a descendant, then runs until interrupted and exits WITHOUT killing it
@@ -28,6 +28,20 @@ const spawnDescendant = async () => {
 	d.unref();
 	await Bun.sleep(1300); // outlive one bridge tree poll (1s)
 };
+
+if (mode === "echo") {
+	// Answers with the exact prompt it was given (the JSON request is the last argument).
+	const request = JSON.parse(process.argv.at(-1) ?? "{}") as { prompt?: string; session_id?: string };
+	item("turn", { ID: "t1" });
+	item("model_response", {
+		Response: {
+			Stop: "complete",
+			Output: [{ Type: "message", Data: { Role: "assistant", Text: `ECHO:${request.prompt}`, Phase: "final_answer" } }],
+			Usage: usage,
+		},
+	});
+	process.exit(0);
+}
 
 if (mode === "error") {
 	process.stderr.write("fake: model must be set\n");

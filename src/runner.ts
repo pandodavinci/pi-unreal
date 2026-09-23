@@ -11,7 +11,7 @@ import { type ChildProcessByStdio, execFileSync, spawn } from "node:child_proces
 import * as path from "node:path";
 import type { Readable } from "node:stream";
 import { resolveRunner } from "./binary";
-import { inspectDotEnv, pinEnvironment } from "./env";
+import { hardenEnvironment, inspectDotEnv, isUnpinnable } from "./env";
 import { type BridgeEvent, EventMapper, type RunStats } from "./events";
 
 export interface UnrealRunOptions {
@@ -67,7 +67,8 @@ export interface UnrealRunResult {
 }
 
 const STDERR_TAIL = 64 * 1024;
-const TREE_POLL_MS = 1_000;
+/** How often the runner's process tree is snapshotted, so commands it starts can be killed if it dies. */
+const TREE_POLL_MS = 250;
 
 interface Proc {
 	pid: number;
@@ -105,6 +106,22 @@ function alive(pid: number): boolean {
 	}
 }
 
+/** Resolves like `promise`, or rejects as soon as either signal aborts (the work itself keeps going). */
+function untilAborted<T>(promise: Promise<T>, ...signals: (AbortSignal | undefined)[]): Promise<T> {
+	const active = signals.filter((signal): signal is AbortSignal => signal !== undefined);
+	if (active.length === 0) return promise;
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(new Error("cancelled"));
+		for (const signal of active) {
+			if (signal.aborted) return onAbort();
+			signal.addEventListener("abort", onAbort, { once: true });
+		}
+		promise.then(resolve, reject).finally(() => {
+			for (const signal of active) signal.removeEventListener("abort", onAbort);
+		});
+	});
+}
+
 export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult> {
 	const started = performance.now();
 	const baseEnv = { ...process.env, ...opts.env };
@@ -117,16 +134,33 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		return { ...base, status: "cancelled", exitCode: null, durationMs: 0 };
 	}
 
-	const dotEnv = inspectDotEnv(opts.cwd);
-	if (dotEnv.unpinnable.length) {
-		return {
-			...base,
-			status: "failed",
-			exitCode: null,
-			durationMs: 0,
-			errorMessage: `Refusing to run: ${path.join(opts.cwd, ".env")} sets ${dotEnv.unpinnable.join(", ")}, which Unreal Agent would apply even over your own settings (it reroutes model traffic). Remove it or run from another directory.`,
-		};
+	const trustDotEnv = baseEnv.PI_UNREAL_TRUST_DOTENV === "1";
+	// Read immediately before spawning (after any runner download) to keep the window before the runner
+	// reads the same file as small as possible.
+	const readDotEnv = () => {
+		const report = inspectDotEnv(opts.cwd);
+		// SANDBOX_EGRESS_PROXY overrides the pinned proxy even in trusted mode, so it is always refused.
+		const refused = report.names.filter(name => (trustDotEnv ? name === "SANDBOX_EGRESS_PROXY" : isUnpinnable(name)));
+		return { report, refused };
+	};
+	const refusal = (refused: string[]) => ({
+		...base,
+		status: "failed" as const,
+		exitCode: null,
+		durationMs: performance.now() - started,
+		errorMessage: `Refusing to run: ${path.join(opts.cwd, ".env")} sets ${refused.join(", ")}, which pi-unreal cannot neutralize (Unreal Agent would reroute its traffic or inject shell code). Remove it${trustDotEnv ? "" : ", or set PI_UNREAL_TRUST_DOTENV=1 if you trust this repository"}.`,
+	});
+	const early = readDotEnv();
+	if (early.refused.length) {
+		return refusal(early.refused);
 	}
+	const aborted = () => opts.signal?.aborted || opts.forceSignal?.aborted;
+	const cancelledBeforeStart = () => ({
+		...base,
+		status: "cancelled" as const,
+		exitCode: null,
+		durationMs: performance.now() - started,
+	});
 
 	const request: Record<string, unknown> = { prompt: opts.task };
 	const thinking = opts.thinkingLevel ?? baseEnv.PI_UNREAL_THINKING;
@@ -137,8 +171,10 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 
 	let argv: string[];
 	try {
+		const runner = opts.command ?? [await untilAborted(resolveRunner(baseEnv, debug), opts.signal, opts.forceSignal)];
+		if (aborted()) return cancelledBeforeStart();
 		argv = [
-			...(opts.command ?? [await resolveRunner(baseEnv, debug)]),
+			...runner,
 			"-workspace",
 			opts.cwd,
 			"-session-directory",
@@ -148,6 +184,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			JSON.stringify(request),
 		];
 	} catch (err) {
+		if (aborted()) return cancelledBeforeStart();
 		return {
 			...base,
 			status: "crashed",
@@ -156,14 +193,16 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			errorMessage: `unreal-agent-runner unavailable: ${err instanceof Error ? err.message : String(err)}`,
 		};
 	}
-	// Default to the Codex login (~/.codex/auth.json) unless the caller configured a provider.
+	// Default to the Codex login (~/.codex/auth.json). The runner's openai-codex provider has no default model.
 	const configured: Record<string, string | undefined> = { ...baseEnv };
-	if (!configured.UNREAL_HARNESS_LLM_PROVIDER) {
-		configured.UNREAL_HARNESS_LLM_PROVIDER = "openai-codex";
-		configured.UNREAL_HARNESS_LLM_MODEL ??= "gpt-6-astra";
+	if (!configured.UNREAL_HARNESS_LLM_PROVIDER) configured.UNREAL_HARNESS_LLM_PROVIDER = "openai-codex";
+	if (configured.UNREAL_HARNESS_LLM_PROVIDER === "openai-codex" && !configured.UNREAL_HARNESS_LLM_MODEL) {
+		configured.UNREAL_HARNESS_LLM_MODEL = "gpt-6-astra";
 	}
-	// Pin credentials, endpoints and shell hooks so the workspace .env cannot override them.
-	const env = pinEnvironment(configured);
+	// Make the workspace .env inert: runner settings are pinned, and (unless trusted) every name it defines.
+	const dotEnv = readDotEnv();
+	if (dotEnv.refused.length) return refusal(dotEnv.refused);
+	const env = hardenEnvironment(configured, trustDotEnv ? [] : dotEnv.report.names);
 	debug(`spawn ${JSON.stringify(argv)} provider=${env.UNREAL_HARNESS_LLM_PROVIDER} model=${env.UNREAL_HARNESS_LLM_MODEL}`);
 
 	// Node APIs only: Pi runs extensions on Node, Oh My Pi on the Bun runtime.
@@ -256,6 +295,9 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	};
 	opts.signal?.addEventListener("abort", onAbort, { once: true });
 	opts.forceSignal?.addEventListener("abort", onForce, { once: true });
+	// Aborted while the runner was starting: listeners attached too late to fire, so act now.
+	if (opts.forceSignal?.aborted) onForce();
+	else if (opts.signal?.aborted) onAbort();
 
 	let runnerError: string | undefined;
 	let streamError: string | undefined;

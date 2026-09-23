@@ -1,4 +1,5 @@
 import { afterEach, describe as group, expect, test } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { BridgeEvent } from "../src/events";
@@ -206,5 +207,33 @@ group("runUnreal: cancellation and cleanup", () => {
 		// Guarantee holds for descendants the 1s tree poll observed before the crash.
 		expect(alive(pid)).toBe(false);
 		expect(result.killedDescendants).toBeGreaterThan(0);
+	});
+});
+
+group("runUnreal: startup and defaults", () => {
+	test("abort while the runner is being resolved still cancels, and nothing starts", async () => {
+		const controller = new AbortController();
+		const state = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-dl-"));
+		// PATH has no runner, so a release download starts (for a version that does not exist).
+		const promise = runUnreal({
+			task: "t",
+			cwd: os.tmpdir(),
+			stateDir: tmp(),
+			env: { PATH: "/nonexistent", PI_UNREAL_STATE_DIR: state, PI_UNREAL_RUNNER_VERSION: "0.0.0-never" },
+			signal: controller.signal,
+		});
+		// runUnreal is now awaiting the (pending) runner download; abort must win without waiting for it.
+		controller.abort();
+		const result = await promise;
+		expect(result.status).toBe("cancelled");
+		expect(result.exitCode).toBeNull();
+	});
+
+	test("abort right after the call (before spawn completes) is honored", async () => {
+		const controller = new AbortController();
+		const { promise } = run("slow", { signal: controller.signal });
+		controller.abort();
+		const result = await promise;
+		expect(result.status).toBe("cancelled");
 	});
 });

@@ -1,23 +1,24 @@
 /**
- * Environment hardening for unreal-agent-runner.
+ * Workspace .env neutralization for unreal-agent-runner.
  *
- * The runner loads <workspace>/.env into its own environment, but skips any variable that is
- * already present (see unreal-agent cmd/internal/agentrunner/run.go loadDotEnv). A repo you open
- * could therefore redirect your API key to another server (UNREAL_HARNESS_LLM_BASE_URL), swap
- * credentials, or make every Bash call source attacker code (BASH_ENV, ZDOTDIR, ...).
- * See https://github.com/unreallabsai/unreal-agent/issues/5.
+ * The runner copies <workspace>/.env into its own environment, skipping only variables that are
+ * already present (unreal-agent cmd/internal/agentrunner/run.go loadDotEnv), and every Bash command it
+ * runs inherits the result. A repo you open could therefore redirect your API key
+ * (UNREAL_HARNESS_LLM_BASE_URL), or run code in every command (BASH_ENV, SHELLOPTS + PS4, BASH_FUNC_*,
+ * LD_PRELOAD, ...). See https://github.com/unreallabsai/unreal-agent/issues/5.
  *
- * Mitigation without changing Unreal: every variable below is set before spawn (to your real
- * value, or to an empty string), so the workspace .env can no longer override it.
- * SANDBOX_EGRESS_PROXY is the one variable the runner always takes from .env, so a .env that sets
- * it is refused outright.
+ * Default: every name the .env defines is made present before spawn (your own value if you have one,
+ * otherwise an empty string), so the runner ignores the whole file. Names that an empty value cannot
+ * neutralize are refused. PI_UNREAL_TRUST_DOTENV=1 lets a trusted repo's .env through, while runner
+ * credentials and endpoints stay pinned.
+ *
+ * The .env is parsed exactly like the runner's Go parser so the two can never disagree about a name.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-/** Variables a workspace .env must never control. */
+/** Runner configuration a workspace must never control, even with PI_UNREAL_TRUST_DOTENV=1. */
 export const PINNED_ENV = [
-	// Runner configuration and credentials
 	"UNREAL_HARNESS_LLM_PROVIDER",
 	"UNREAL_HARNESS_LLM_MODEL",
 	"UNREAL_HARNESS_LLM_BASE_URL",
@@ -31,56 +32,55 @@ export const PINNED_ENV = [
 	"OPENAI_CODEX_ACCOUNT_ID",
 	"OPENAI_CODEX_AUTH_FILE",
 	"CODEX_HOME",
-	"HARNESS_CREATE_FILE_HELPER",
-	"HARNESS_CREATE_FILE_PATH",
-	// Network routing and TLS trust
 	"HTTPS_PROXY",
 	"HTTP_PROXY",
 	"ALL_PROXY",
-	"NO_PROXY",
 	"https_proxy",
 	"http_proxy",
 	"all_proxy",
-	"no_proxy",
 	"SSL_CERT_FILE",
 	"SSL_CERT_DIR",
-	"GODEBUG",
-	// Code the agent's shell would execute or load implicitly
-	"HOME",
-	"PATH",
-	"SHELL",
-	"BASH_ENV",
-	"ENV",
-	"ZDOTDIR",
-	"PROMPT_COMMAND",
-	"LD_PRELOAD",
-	"LD_LIBRARY_PATH",
-	"DYLD_INSERT_LIBRARIES",
-	"DYLD_LIBRARY_PATH",
-	"DYLD_FRAMEWORK_PATH",
-	"NODE_OPTIONS",
-	"PYTHONSTARTUP",
-	"PYTHONPATH",
-	"GIT_CONFIG_GLOBAL",
-	"GIT_SSH_COMMAND",
 ] as const;
 
-/** Returns a copy of env where every PINNED_ENV variable is present (real value or ""). */
-export function pinEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
-	const out = { ...env };
-	for (const name of PINNED_ENV) {
-		if (out[name] !== undefined) continue;
-		// Empty ZDOTDIR would make zsh read /.zshenv; point it at the user's real home instead.
-		out[name] = name === "ZDOTDIR" ? (out.HOME ?? "") : "";
+/**
+ * Names that must not come from an untrusted .env and cannot be neutralized with an empty value:
+ * the runner applies SANDBOX_EGRESS_PROXY even when it is already set, and an empty BASH_FUNC_* entry is
+ * still a (broken) function definition for Bash to import.
+ */
+export function isUnpinnable(name: string): boolean {
+	return name === "SANDBOX_EGRESS_PROXY" || name.startsWith("BASH_FUNC_");
+}
+
+/** Go's unicode.IsSpace, which strings.TrimSpace uses. JavaScript's \s differs (U+0085, U+FEFF). */
+const GO_SPACE = "\t\n\v\f\r \u0085                 　";
+
+export function goTrimSpace(text: string): string {
+	let start = 0;
+	let end = text.length;
+	while (start < end && GO_SPACE.includes(text[start]!)) start++;
+	while (end > start && GO_SPACE.includes(text[end - 1]!)) end--;
+	return text.slice(start, end);
+}
+
+/** Variable names the runner would read from this .env text (mirrors loadDotEnv line by line). */
+export function dotEnvNames(text: string): string[] {
+	const names = new Set<string>();
+	for (const rawLine of text.split("\n")) {
+		const line = goTrimSpace(rawLine);
+		if (line === "" || line.startsWith("#")) continue;
+		const eq = line.indexOf("=");
+		if (eq < 0) continue;
+		const name = goTrimSpace(line.slice(0, eq));
+		if (name !== "") names.add(name);
 	}
-	return out;
+	return [...names];
 }
 
 export interface DotEnvReport {
 	exists: boolean;
-	/** Variable names the .env sets (values are never read into memory beyond the name). */
+	/** Names the .env defines. Values are never kept. */
 	names: string[];
-	/** Names the runner would still honor despite pinning (currently only SANDBOX_EGRESS_PROXY). */
+	/** Names that cause a refusal unless the .env is trusted (and SANDBOX_EGRESS_PROXY even then). */
 	unpinnable: string[];
 }
 
@@ -91,13 +91,43 @@ export function inspectDotEnv(workspace: string): DotEnvReport {
 	} catch {
 		return { exists: false, names: [], unpinnable: [] };
 	}
-	const names: string[] = [];
-	for (const raw of text.split("\n")) {
-		const line = raw.trim();
-		if (!line || line.startsWith("#")) continue;
-		const eq = line.indexOf("=");
-		if (eq <= 0) continue;
-		names.push(line.slice(0, eq).trim());
+	const names = dotEnvNames(text);
+	return { exists: true, names, unpinnable: names.filter(isUnpinnable) };
+}
+
+/**
+ * Environment for the runner: every name in `neutralize` and in PINNED_ENV is present (your value or ""),
+ * so the workspace .env cannot supply it.
+ */
+export function hardenEnvironment(
+	env: Record<string, string | undefined>,
+	neutralize: readonly string[] = [],
+): Record<string, string | undefined> {
+	const out = { ...env };
+	for (const name of [...PINNED_ENV, ...neutralize]) {
+		if (out[name] === undefined) out[name] = neutralValue(name, env);
 	}
-	return { exists: true, names, unpinnable: names.filter(n => n === "SANDBOX_EGRESS_PROXY") };
+	return out;
+}
+
+/**
+ * An empty value is not the same as an unset one for some tools (git reads GIT_CONFIG_GLOBAL="" as a file
+ * named ""). For those, use what the tool would do when the variable is unset.
+ */
+function neutralValue(name: string, env: Record<string, string | undefined>): string {
+	const home = env.HOME ?? "";
+	switch (name) {
+		case "GIT_CONFIG_GLOBAL": {
+			const xdg = path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "git", "config");
+			const legacy = path.join(home, ".gitconfig");
+			return fs.existsSync(legacy) ? legacy : fs.existsSync(xdg) ? xdg : "/dev/null";
+		}
+		case "GIT_SSH_COMMAND":
+		case "GIT_SSH":
+			return "ssh";
+		case "ZDOTDIR":
+			return home;
+		default:
+			return "";
+	}
 }

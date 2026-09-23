@@ -54,16 +54,24 @@ export default function piUnreal(pi: ExtensionAPI) {
 	let liveCtx: ExtensionContext | undefined;
 	let ticking = false;
 
+	let debugFileReady = false;
 	const debug = (scope: string, msg: string) => {
 		if (!debugEnabled) return;
 		try {
-			fs.mkdirSync(stateRoot, { recursive: true });
+			if (!debugFileReady) {
+				// Also tighten a state dir / log created by an older version with default permissions.
+				fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+				fs.chmodSync(stateRoot, 0o700);
+				fs.appendFileSync(debugFile, "", { mode: 0o600 });
+				fs.chmodSync(debugFile, 0o600);
+				debugFileReady = true;
+			}
 			fs.appendFileSync(debugFile, `${new Date().toISOString()} [${scope}] ${msg}\n`);
 		} catch {}
 	};
 	const timers = safeTimers(err => debug("timer", String(err)));
 
-	registerChatMode(pi, debug);
+	const chat = registerChatMode(pi, debug);
 
 	const currentSessionId = () => liveCtx?.sessionManager.getSessionId() ?? "";
 	const running = () => [...jobs.values()].filter(j => !j.result);
@@ -99,8 +107,9 @@ export default function piUnreal(pi: ExtensionAPI) {
 		} as never;
 		// Command jobs: append to the conversation (and model context) without starting a turn; the host is
 		// idle here (see deliver), where plain delivery displays immediately in both hosts.
-		// Tool jobs: wake the model so it can act on the result.
-		if (job.origin === "tool") pi.sendMessage(message, wakeModelDelivery(pi));
+		// Tool jobs: wake the model so it can act on the result, except in Unreal mode, where the host's model
+		// must stay idle; there the result is only shown.
+		if (job.origin === "tool" && !chat.isUnrealMode()) pi.sendMessage(message, wakeModelDelivery(pi));
 		else pi.sendMessage(message);
 	};
 
@@ -119,7 +128,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 			liveCtx?.ui.notify(`unreal ${job.id} belongs to another session; result kept in /unreal-jobs`, "info");
 			return;
 		}
-		if (job.origin === "command" && !liveCtx?.isIdle()) {
+		if ((job.origin === "command" || chat.isUnrealMode()) && !liveCtx?.isIdle()) {
 			pendingDelivery.push(job);
 			return;
 		}

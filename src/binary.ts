@@ -3,7 +3,8 @@
  *
  * Order: UNREAL_AGENT_RUNNER → `unreal-agent-runner` on PATH → cached download → download.
  * Downloads come from github.com/unreallabsai/unreal-agent releases and are verified against the
- * release's SHA256SUMS before they are made executable.
+ * release's SHA256SUMS before they are made executable. The cache is keyed by version and platform, and
+ * a cached binary is re-hashed on every resolve; anything that does not match is downloaded again.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -55,7 +56,7 @@ export function parseSums(text: string): Map<string, string> {
 	return sums;
 }
 
-let inflight: Promise<string> | undefined;
+const inflight = new Map<string, Promise<string>>();
 
 export async function resolveRunner(
 	env: Record<string, string | undefined> = process.env,
@@ -66,12 +67,24 @@ export async function resolveRunner(
 	const onPath = which(BINARY, env.PATH ?? "");
 	if (onPath) return onPath;
 	const version = env.PI_UNREAL_RUNNER_VERSION ?? RUNNER_VERSION;
-	const target = path.join(stateRoot(env), "bin", version, BINARY);
-	if (fs.existsSync(target)) return target;
-	inflight ??= download(version, target, log, fetchImpl).finally(() => {
-		inflight = undefined;
-	});
-	return inflight;
+	const target = path.join(stateRoot(env), "bin", version, platformTag(), BINARY);
+	if (cachedBinaryIsIntact(target)) return target;
+	let pending = inflight.get(target);
+	if (!pending) {
+		pending = download(version, target, log, fetchImpl).finally(() => inflight.delete(target));
+		inflight.set(target, pending);
+	}
+	return pending;
+}
+
+/** The installed binary must be executable and match the hash recorded when it was verified. */
+function cachedBinaryIsIntact(target: string): boolean {
+	try {
+		fs.accessSync(target, fs.constants.X_OK);
+		return fs.readFileSync(`${target}.sha256`, "utf8").trim() === sha256(target);
+	} catch {
+		return false;
+	}
 }
 
 async function download(version: string, target: string, log: (msg: string) => void, fetchImpl: typeof fetch) {
@@ -95,12 +108,13 @@ async function download(version: string, target: string, log: (msg: string) => v
 		} catch (err) {
 			throw new Error(`extract ${archive}: ${String((err as { stderr?: Buffer }).stderr ?? err).trim()}`);
 		}
-		fs.mkdirSync(dir, { recursive: true });
-		fs.chmodSync(path.join(tmp, BINARY), 0o755);
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 		// Rename is atomic on the same filesystem; copy+rename handles tmp on another volume.
-		const staged = `${target}.${process.pid}`;
+		const staged = `${target}.${process.pid}.tmp`;
 		fs.copyFileSync(path.join(tmp, BINARY), staged);
 		fs.chmodSync(staged, 0o755);
+		fs.writeFileSync(`${staged}.sha256`, `${sha256(staged)}\n`, { mode: 0o600 });
+		fs.renameSync(`${staged}.sha256`, `${target}.sha256`);
 		fs.renameSync(staged, target);
 		log(`installed ${target} (sha256 ${expected.slice(0, 12)}…)`);
 		return target;
