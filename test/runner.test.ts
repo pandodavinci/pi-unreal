@@ -248,18 +248,20 @@ group("runUnreal: host responsiveness", () => {
 		const controller = new AbortController();
 		const { promise } = run("slow", { signal: controller.signal });
 		await Bun.sleep(300);
+		// A synchronous `ps` per poll stalls the loop for at least psMs at every poll; random CI noise causes
+		// an occasional stall. Count stalls instead of trusting a single worst case.
+		const stallMs = Math.max(8, psMs * 0.8);
 		let last = performance.now();
-		let maxLag = 0;
+		let stalls = 0;
 		const timer = setInterval(() => {
 			const now = performance.now();
-			maxLag = Math.max(maxLag, now - last - 2);
+			if (now - last - 2 >= stallMs) stalls++;
 			last = now;
 		}, 2);
 		await Bun.sleep(1500); // six polls
 		clearInterval(timer);
 		controller.abort();
 		await promise;
-		// A synchronous `ps` per poll shows up as lag of at least psMs (about 2x in practice).
-		expect(maxLag).toBeLessThan(Math.max(15, psMs));
+		expect(stalls).toBeLessThan(3);
 	});
 });
