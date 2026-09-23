@@ -104,7 +104,7 @@ The same extension works in both hosts. It uses Node APIs only (Pi runs extensio
 
 - Unreal uses its own tools (Bash, ViewImage, and skills in `.harness/skills`). Pi's tools, skills and MCP servers are not available to it. That is the point of an Unreal vs Pi comparison, but it also means fewer capabilities than Pi's built-in harness.
 - Windows is not supported (Unreal publishes macOS and Linux runners only).
-- Very new. Tested on Pi 0.87.1 and Oh My Pi 18.2.10, macOS arm64.
+- Very new. Tested on Pi 0.87.1 and Oh My Pi 18.2.8 and 18.2.10 (macOS arm64), installed from GitHub with the commands above. CI runs the test suite on macOS and Linux.
 
 ## Development
 
