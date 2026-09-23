@@ -33,6 +33,8 @@ const child = spawn(command[0], command.slice(1), {
 		PI_CODING_AGENT_DIR: path.join(tmp, "pi-agent"), // throwaway Pi config, same as a fresh CI machine
 		PI_UNREAL_STATE_DIR: path.join(tmp, "state"),
 		UNREAL_AGENT_RUNNER: runner,
+		// Oh My Pi refuses to start without any model configured. The test never calls one.
+		...(host === "omp" && !process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: "sk-e2e-never-used" } : {}),
 	},
 });
 
