@@ -94,7 +94,7 @@ Slash commands and `!bash` always go to Pi. A prompt on the command line goes to
 | Oh My Pi RPC and ACP | off, with a warning (fix pending upstream: [oh-my-pi#11834](https://github.com/can1357/oh-my-pi/pull/11834)) | yes; results also go to stderr, and in RPC to a notification ([oh-my-pi#12718](https://github.com/can1357/oh-my-pi/pull/12718)) |
 | Print (`-p`) and JSON | off, with a warning on stderr | `/unreal` waits and prints the result; the tool always runs in the foreground |
 
-In print mode, run `/unreal` in a fresh session (`--no-session`): when resuming a chat the host also prints its own last answer afterwards. Pi exits with code 1 when the job failed; Oh My Pi's print mode always exits 0.
+In print mode, run `/unreal` in a fresh session (`--no-session`): when resuming a chat the host also prints its own last answer afterwards. When the job fails, Pi exits with code 1; Oh My Pi's print mode still exits 0 unless the host itself failed.
 
 | Background commands | |
 | --- | --- |

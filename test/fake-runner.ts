@@ -10,11 +10,18 @@
 export {};
 
 const mode = process.env.FAKE_MODE ?? "ok";
-// FAKE_RECORD: append every prompt this runner receives to that file (tests assert what actually ran).
-if (process.env.FAKE_RECORD) {
-	const request = JSON.parse(process.argv.at(-1) ?? "{}") as { prompt?: string };
-	await Bun.write(process.env.FAKE_RECORD, `${(await Bun.file(process.env.FAKE_RECORD).text().catch(() => ""))}${JSON.stringify(request.prompt)}\n`);
-}
+// FAKE_RECORD: log "start <prompt>" when this runner starts and "end" when it exits (tests assert what ran,
+// and that runs never overlap).
+const recordLine = async (line: string) => {
+	if (!process.env.FAKE_RECORD) return;
+	const previous = await Bun.file(process.env.FAKE_RECORD).text().catch(() => "");
+	await Bun.write(process.env.FAKE_RECORD, `${previous}${line}\n`);
+};
+await recordLine(`start ${JSON.stringify((JSON.parse(process.argv.at(-1) ?? "{}") as { prompt?: string }).prompt)}`);
+process.on("exit", () => {
+	if (!process.env.FAKE_RECORD) return;
+	require("node:fs").appendFileSync(process.env.FAKE_RECORD, "end\n");
+});
 const emit = (obj: unknown) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 let seq = 0;
 const item = (Kind: string, Data: unknown) => emit({ Sequence: ++seq, Kind, Data });

@@ -71,13 +71,22 @@ const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 /**
  * The command-line argument this prompt came from, if any. Oh My Pi builds its startup prompt as
  * [piped stdin + "\n"] + [@file contents] + first message, so the message argument is the prompt or ends it.
- * Flags ("-...") and file references ("@...") are not messages; each argument is taken over once.
+ * Flags ("-...") and file references ("@...") are not messages; each argument is taken over once. A one-word
+ * message after @file context is not recognized (it could be a flag's value); type such prompts in the chat.
  */
 export function commandLinePromptArg(prompt: string, args: readonly string[], taken: ReadonlySet<string>): string | undefined {
 	if (!prompt) return undefined;
 	return args
 		.map(arg => arg.trim())
-		.find(arg => arg && !arg.startsWith("-") && !arg.startsWith("@") && !taken.has(arg) && (prompt === arg || prompt.endsWith(arg)));
+		.find(
+			arg =>
+				arg &&
+				!arg.startsWith("-") &&
+				!arg.startsWith("@") &&
+				!taken.has(arg) &&
+				// A one-word argument could be a flag's value ("--thinking high"): only an exact match counts then.
+				(prompt === arg || (/\s/.test(arg) && prompt.endsWith(arg))),
+		);
 }
 
 export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: string) => void): { isUnrealMode(): boolean } {
@@ -99,12 +108,14 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	/** Command-line arguments already taken over as prompts. */
 	const takenOverArgs = new Set<string>();
 	let pendingHandoff: { cancelled: boolean } | undefined;
+	/** The turn being processed, from the moment the pump takes it (so Esc and shutdown can always reach it). */
 	let active:
 		| {
 				turn: Turn;
 				controller: AbortController;
 				force: AbortController;
-				done: Promise<unknown>;
+				/** Set once the runner starts. */
+				done?: Promise<unknown>;
 				startedAt: number;
 				steps: string[];
 				/** Streaming preview of the message currently being written. */
@@ -243,6 +254,22 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 
 	const runTurn = async (turn: Turn) => {
 		const ctx = liveCtx!;
+		const controller = new AbortController();
+		const force = new AbortController();
+		const steps: string[] = [];
+		const startedAt = Date.now();
+		active = { turn, controller, force, startedAt, steps, liveText: "", liveItem: "", thinking: "" };
+		try {
+			await processTurn(ctx, turn, active);
+		} finally {
+			active = undefined;
+			showProgress();
+			showStatus();
+		}
+	};
+
+	const processTurn = async (ctx: ExtensionContext, turn: Turn, current: NonNullable<typeof active>) => {
+		const { controller, force, steps, startedAt } = current;
 		if (!dotEnvNoticeShown.has(ctx.cwd)) {
 			dotEnvNoticeShown.add(ctx.cwd);
 			const dotEnv = inspectDotEnv(ctx.cwd);
@@ -292,11 +319,6 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			cancelledTurns: readCancelled(stateRoot),
 			maxChars: MAX_CONTEXT_CHARS,
 		});
-		const controller = new AbortController();
-		const force = new AbortController();
-		const steps: string[] = [];
-		const startedAt = Date.now();
-		const turnState = { liveText: "", liveItem: "", thinking: "" };
 		const done = runUnreal({
 			task: withContext(context.text, withImages(turn.text, turn.images)),
 			cwd: ctx.cwd,
@@ -312,7 +334,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				showProgress();
 			},
 			onEvent: event => {
-				const live = active ?? turnState;
+				const live = current;
 				if (event.kind === "partial") {
 					if (event.partialKind === "reset") {
 						live.liveText = "";
@@ -338,13 +360,11 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				showProgress();
 			},
 		});
-		active = { turn, controller, force, done, startedAt, steps, ...turnState };
+		current.done = done;
 		showStatus();
 		showProgress();
 		const result = await done;
-		active = undefined;
 		showProgress();
-		showStatus();
 
 		// A turn that never reached Unreal's session leaves it where it was.
 		recordOwner(result.promptPersisted ? { hostSession, headTurn: turn.id } : previousOwner);
@@ -387,19 +407,25 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		} satisfies AnswerDetails);
 	};
 
+	/** One pump at a time: turns never overlap, including a turn's wait for its message to land. */
+	let pumping = false;
 	const pump = async () => {
-		if (active) return;
-		while (queue.length && enabled) {
-			const turn = queue.shift()!;
-			showStatus();
-			try {
-				await runTurn(turn);
-			} catch (err) {
-				active = undefined;
-				liveCtx?.ui.notify(`unreal turn failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+		if (pumping) return;
+		pumping = true;
+		try {
+			while (queue.length && enabled) {
+				const turn = queue.shift()!;
+				showStatus();
+				try {
+					await runTurn(turn);
+				} catch (err) {
+					liveCtx?.ui.notify(`unreal turn failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+				}
 			}
+		} finally {
+			pumping = false;
+			showStatus();
 		}
-		showStatus();
 	};
 
 	/** Unreal's request only takes text; its ViewImage tool reads files by absolute path. */
@@ -535,7 +561,13 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		void untilIdle(ctx).then(idle => {
 			if (pendingHandoff === handoff) pendingHandoff = undefined;
 			if (handoff.cancelled) return;
-			const moved = leaf !== null && !branchOf(ctx).some(entry => entry.id === leaf);
+			// Still the same conversation point: the captured entry is on the branch and nothing the user said
+			// follows it (another branch that merely shares that ancestor has its own messages after it).
+			const branch = branchOf(ctx);
+			const at = leaf === null ? -1 : branch.findIndex(entry => entry.id === leaf);
+			const moved =
+				(leaf !== null && at < 0) ||
+				branch.slice(at + 1).some(entry => entry.customType === USER_TYPE || (entry.type === "message" && entry.message?.role === "user"));
 			if (!idle || shuttingDown || moved || hostSession !== liveCtx?.sessionManager.getSessionId()) {
 				if (!shuttingDown) warn(ctx, "pi-unreal could not hand the command-line prompt to Unreal. Type it again.");
 				return;
@@ -593,9 +625,9 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		if (!active) return;
 		const current = active;
 		current.controller.abort();
-		await withDeadline(current.done, SHUTDOWN_GRACE_MS);
+		await withDeadline(current.done ?? Promise.resolve(), SHUTDOWN_GRACE_MS);
 		current.force.abort();
-		await withDeadline(current.done, SHUTDOWN_FORCE_WAIT_MS);
+		await withDeadline(current.done ?? Promise.resolve(), SHUTDOWN_FORCE_WAIT_MS);
 	});
 
 	return { isUnrealMode: () => enabled };

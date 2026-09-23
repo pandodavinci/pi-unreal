@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import piUnreal from "../src/index";
+import { addCancelled, readCancelled } from "../src/state";
 import { createFakeHost, fakeRunnerExecutable, waitFor } from "./fake-host";
 
 const saved = { ...process.env };
@@ -433,5 +434,41 @@ describe("review round 8 cases", () => {
 		host.state.idle = true;
 		await Bun.sleep(300);
 		expect(host.sent.filter(s => s.message.customType === "unreal-you")).toEqual([]);
+	});
+});
+
+describe("review round 9 cases", () => {
+	test("turns never overlap, even while a new message is still landing in the transcript", async () => {
+		const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-rec-")), "prompts");
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("delay", record);
+		const host = createFakeHost({ ohMyPi: true, asyncInsert: true, flags: { unreal: true } });
+		piUnreal(host.pi as never);
+		await host.emit("session_start", { reason: "startup" });
+		for (const text of ["one", "two", "three"]) await host.emit("input", { text, source: "interactive" });
+		await waitFor(() => answers(host).length === 3, 15_000);
+		const bodies = answers(host).map(a => (a.message.details as { body: string }).body);
+		expect(bodies.map(body => body.split("\n").at(-1))).toEqual(["one", "two", "three"].map((t, i) => (i === 0 ? `ECHO:${t}` : t)));
+		// Strictly one run at a time: start, end, start, end, ...
+		const log = fs.readFileSync(record, "utf8").trim().split("\n").map(line => (line.startsWith("start") ? "start" : line));
+		expect(log).toEqual(["start", "end", "start", "end", "start", "end"]);
+	}, 20_000);
+
+	test("Esc reaches a turn that is still waiting for its message to land", async () => {
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("echo");
+		const host = createFakeHost({ asyncInsert: true, flags: { unreal: true } });
+		piUnreal(host.pi as never);
+		await host.emit("session_start", { reason: "startup" });
+		await host.emit("input", { text: "hello", source: "interactive" });
+		expect(host.pressKey("\x1b")).toBe(true);
+		await waitFor(() => answers(host).length === 1);
+		expect((answers(host)[0]!.message.details as { status: string }).status).toBe("cancelled");
+	});
+
+	test("cancellations do not expire, and older per-chat files are still honored", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-cancel-"));
+		addCancelled(root, ["old"], Date.now() - 400 * 24 * 60 * 60 * 1000);
+		fs.mkdirSync(path.join(root, "cancelled"));
+		fs.writeFileSync(path.join(root, "cancelled", "s1.json"), JSON.stringify(["legacy"]));
+		expect([...readCancelled(root)].sort()).toEqual(["legacy", "old"]);
 	});
 });

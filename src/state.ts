@@ -38,7 +38,7 @@ async function removeOlderThan(dir: string, maxAgeMs: number, now: number): Prom
 export async function pruneState(root: string, now = Date.now()): Promise<number> {
 	let removed = 0;
 	for (const dir of ["jobs", "chat"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.runs, now);
-	for (const dir of ["images", "cancelled"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.sessions, now);
+	for (const dir of ["images"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.sessions, now);
 	// Sessions, then everything that belongs to a session that is gone.
 	const sessions = path.join(root, "sessions");
 	const live = new Set<string>();
@@ -70,18 +70,6 @@ export async function pruneState(root: string, now = Date.now()): Promise<number
 			if (now - (await fs.lstat(dir)).mtimeMs < RETENTION.runs) continue;
 			await fs.rm(dir, { recursive: true, force: true });
 			removed++;
-		}
-	} catch {}
-	// Old cancellations: their messages are in chats that have expired too.
-	try {
-		const records = readJson<Record<string, number>>(cancelledFile(root));
-		if (records) {
-			const kept = Object.fromEntries(Object.entries(records).filter(([, at]) => now - at <= RETENTION.sessions));
-			const dropped = Object.keys(records).length - Object.keys(kept).length;
-			if (dropped > 0) {
-				writeJson(cancelledFile(root), kept);
-				removed += dropped;
-			}
 		}
 	} catch {}
 	// Keep the debug log bounded: start over once it is too large.
@@ -148,13 +136,24 @@ export function touchChat(root: string, hostSession: string) {
  */
 const cancelledFile = (root: string) => path.join(root, "cancelled.json");
 
+/** Kept, not expired: a chat can be resumed any time. About 60 bytes each; the newest are kept past the cap. */
+const MAX_CANCELLED = 20_000;
+
 export function readCancelled(root: string): Set<string> {
-	return new Set(Object.keys(readJson<Record<string, number>>(cancelledFile(root)) ?? {}));
+	const ids = new Set(Object.keys(readJson<Record<string, number>>(cancelledFile(root)) ?? {}));
+	// Earlier builds kept one file per chat under cancelled/.
+	try {
+		for (const name of fsSync.readdirSync(path.join(root, "cancelled"))) {
+			for (const id of readJson<string[]>(path.join(root, "cancelled", name)) ?? []) ids.add(id);
+		}
+	} catch {}
+	return ids;
 }
 
 export function addCancelled(root: string, turnIds: readonly string[], now = Date.now()) {
 	if (turnIds.length === 0) return;
 	const records = readJson<Record<string, number>>(cancelledFile(root)) ?? {};
 	for (const id of turnIds) records[id] = now;
-	writeJson(cancelledFile(root), records);
+	const newest = Object.entries(records).sort(([, a], [, b]) => b - a).slice(0, MAX_CANCELLED);
+	writeJson(cancelledFile(root), Object.fromEntries(newest));
 }

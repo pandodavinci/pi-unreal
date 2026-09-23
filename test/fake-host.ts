@@ -24,7 +24,14 @@ export interface FakeContext {
 }
 
 export function createFakeHost(
-	opts: { ohMyPi?: boolean; flags?: Record<string, boolean>; cwd?: string; mode?: FakeContext["mode"] } = {},
+	opts: {
+		ohMyPi?: boolean;
+		flags?: Record<string, boolean>;
+		cwd?: string;
+		mode?: FakeContext["mode"];
+		/** Append posted messages to the branch a moment later, as Oh My Pi does (async normalization). */
+		asyncInsert?: boolean;
+	} = {},
 ) {
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, { handler: (args: string, ctx: FakeContext) => Promise<void> }>();
@@ -73,7 +80,9 @@ export function createFakeHost(
 		// Like both hosts when idle: the message is recorded and appended to the current branch.
 		sendMessage: (message: Sent["message"], options?: Sent["options"]) => {
 			sent.push({ message, options });
-			state.branch.push({ id: `msg-${sent.length}`, type: "custom_message", ...message });
+			const entry = { id: `msg-${sent.length}`, type: "custom_message", ...message };
+			if (opts.asyncInsert) setTimeout(() => state.branch.push(entry), 30);
+			else state.branch.push(entry);
 		},
 		// Like the hosts: a custom entry on the current branch, never sent to a model.
 		appendEntry: (customType: string, data: unknown) => state.branch.push({ id: `entry-${state.branch.length}`, type: "custom", customType, data }),
