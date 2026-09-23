@@ -85,7 +85,7 @@ Pi stays interactive. `/unreal-jobs` shows progress, `/unreal-cancel` stops the 
 | Type while it works | Messages queue and run in order. Esc stops the current one and drops the queue. |
 | `/harness pi`, `/harness unreal` | Switch who answers, in the same chat. Refused while the other side is still working. |
 
-Slash commands and `!bash` always go to Pi. A prompt on the command line goes to Unreal too: with released Pi 0.87.1, put it before the flag (`pi "fix the tests" --unreal`), since Pi's parser otherwise reads it as the flag's value; Oh My Pi checks its own model login before handing that first prompt over, so without one, type the prompt in the chat instead.
+Slash commands and `!bash` always go to Pi. A prompt on the command line goes to Unreal too: with released Pi 0.87.1, put it before the flag (`pi "fix the tests" --unreal`), since Pi's parser otherwise reads it as the flag's value. In Oh My Pi this works for a quoted message (also after `@file` context when the message has more than one word) and needs Oh My Pi's own model login; a prompt made only of `@file` or piped input stays with Oh My Pi. Type those in the chat instead.
 
 | Mode | `--unreal` | `/unreal`, `unreal_delegate` |
 | --- | --- | --- |
@@ -141,6 +141,7 @@ Set these in your shell, not in a project's `.env`: by default pi-unreal neutral
 
 - Unreal uses its own tools (Bash, ViewImage, skills in `.harness/skills`). Pi's tools, skills and MCP servers are not available to it.
 - Commands are tracked by polling Unreal's process tree 4 times a second. A command started and orphaned by Unreal in the instant before it exits (on a crash, or while stopping) can survive cleanup.
+- Stopped and dropped messages are remembered (the newest 20,000) so they are never replayed to Unreal, also in forks.
 - Tested by hand on Pi 0.87.1 and Oh My Pi 18.2.8 to 18.2.11 (macOS arm64). CI runs the test suite on macOS and Linux, loads the plugin on Node, and drives the real `pi` and `omp` binaries end to end.
 
 ## Contributing

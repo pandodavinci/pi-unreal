@@ -2,9 +2,9 @@
  * Small persistent records under ~/.cache/pi-unreal, and their housekeeping.
  *
  * Per-run logs and background job output are disposable after two weeks. Unreal sessions are its conversation
- * memory; they, their command output (sessions/operations/<id>) and ownership records, pasted images and
- * cancellation lists live as long as sessions (60 days since last use). A chat whose session was removed is
- * simply re-seeded from its visible history.
+ * memory; they, their command output (sessions/operations/<id>) and ownership records, and pasted images live
+ * 60 days since last use. A chat whose session was removed is simply re-seeded from its visible history.
+ * Cancellations do not expire (the newest 20,000 are kept).
  */
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
