@@ -110,7 +110,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 		// must stay idle; there the result is only shown.
 		if (job.origin === "tool" && !chat.isUnrealMode()) pi.sendMessage(message, wakeModelDelivery(pi));
 		else pi.sendMessage(message);
-		// Outside its TUI, Oh My Pi appends such a message without emitting it to the client (oh-my-pi#13014),
+		// Outside its TUI, Oh My Pi appends such a message without emitting it to the client (fix pending: oh-my-pi#12718),
 		// so show the result as a notification there too.
 		if (job.origin === "command" && liveCtx && !idleMessagesReachClient(pi, hostMode(liveCtx))) {
 			tell(liveCtx, `[unreal ${job.id}] ${formatSummary(job.task, result)}`, result.status === "completed" ? "info" : "error");

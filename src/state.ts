@@ -72,6 +72,18 @@ export async function pruneState(root: string, now = Date.now()): Promise<number
 			removed++;
 		}
 	} catch {}
+	// Old cancellations: their messages are in chats that have expired too.
+	try {
+		const records = readJson<Record<string, number>>(cancelledFile(root));
+		if (records) {
+			const kept = Object.fromEntries(Object.entries(records).filter(([, at]) => now - at <= RETENTION.sessions));
+			const dropped = Object.keys(records).length - Object.keys(kept).length;
+			if (dropped > 0) {
+				writeJson(cancelledFile(root), kept);
+				removed += dropped;
+			}
+		}
+	} catch {}
 	// Keep the debug log bounded: start over once it is too large.
 	try {
 		const log = path.join(root, "debug.log");
@@ -122,24 +134,27 @@ export function imagesDir(root: string, hostSession: string): string {
 	return path.join(root, "images", safeName(hostSession));
 }
 
-/** Mark a host chat's records as in use, so pruning (by last use) keeps them while the chat is active. */
+/** Mark a host chat's images as in use, so pruning (by last use) keeps them while the chat is active. */
 export function touchChat(root: string, hostSession: string) {
 	const now = new Date();
-	for (const target of [path.join(root, "cancelled", `${safeName(hostSession)}.json`), imagesDir(root, hostSession)]) {
-		try {
-			fsSync.utimesSync(target, now, now);
-		} catch {}
-	}
+	try {
+		fsSync.utimesSync(imagesDir(root, hostSession), now, now);
+	} catch {}
 }
 
-/** Turns of a host chat that were canceled or dropped; they are never replayed to Unreal. */
-export function readCancelled(root: string, hostSession: string): Set<string> {
-	return new Set(readJson<string[]>(path.join(root, "cancelled", `${safeName(hostSession)}.json`)) ?? []);
+/**
+ * Turns that were canceled or dropped; they are never replayed to Unreal. Turn ids are random UUIDs, so one
+ * list serves every chat, including forks that copied a canceled message. Maps turn id -> time recorded.
+ */
+const cancelledFile = (root: string) => path.join(root, "cancelled.json");
+
+export function readCancelled(root: string): Set<string> {
+	return new Set(Object.keys(readJson<Record<string, number>>(cancelledFile(root)) ?? {}));
 }
 
-export function addCancelled(root: string, hostSession: string, turnIds: readonly string[]) {
+export function addCancelled(root: string, turnIds: readonly string[], now = Date.now()) {
 	if (turnIds.length === 0) return;
-	const ids = readCancelled(root, hostSession);
-	for (const id of turnIds) ids.add(id);
-	writeJson(path.join(root, "cancelled", `${safeName(hostSession)}.json`), [...ids]);
+	const records = readJson<Record<string, number>>(cancelledFile(root)) ?? {};
+	for (const id of turnIds) records[id] = now;
+	writeJson(cancelledFile(root), records);
 }

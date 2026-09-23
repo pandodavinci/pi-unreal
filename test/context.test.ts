@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { commandLinePromptArg } from "../src/chat-mode";
 import { ANSWER_TYPE, CANCELLED_TYPE, type Entry, USER_TYPE, unrealSessionFor, unseenContext } from "../src/context";
 
 const you = (id: string, turnId: string, text: string): Entry => ({ id, type: "custom_message", customType: USER_TYPE, content: "x", details: { text, turnId } });
@@ -88,5 +89,18 @@ describe("unseenContext: persistent cancellations", () => {
 	test("turns canceled in another branch or before a restart are skipped", () => {
 		const branch = [you("y1", "t1", "delete everything")];
 		expect(unseenContext(branch, opts({ cancelledTurns: new Set(["t1"]) })).text).toBe("");
+	});
+});
+
+describe("commandLinePromptArg", () => {
+	const none = new Set<string>();
+	test("matches the message argument, alone or after @file / stdin context", () => {
+		expect(commandLinePromptArg("fix the tests", ["--unreal", "fix the tests"], none)).toBe("fix the tests");
+		expect(commandLinePromptArg("<file>x</file>\nfix it", ["@a.md", "fix it"], none)).toBe("fix it");
+	});
+	test("ignores flags, file references, other prompts and already-taken arguments", () => {
+		expect(commandLinePromptArg("an extension prompt", ["--model", "gpt"], none)).toBeUndefined();
+		expect(commandLinePromptArg("@a.md", ["@a.md"], none)).toBeUndefined();
+		expect(commandLinePromptArg("fix", ["fix"], new Set(["fix"]))).toBeUndefined();
 	});
 });

@@ -91,7 +91,7 @@ Slash commands and `!bash` always go to Pi. A prompt on the command line goes to
 | --- | --- | --- |
 | Interactive terminal (Pi, Oh My Pi) | yes | yes |
 | Pi RPC | yes | yes |
-| Oh My Pi RPC and ACP | off, with a warning ([oh-my-pi#13013](https://github.com/can1357/oh-my-pi/issues/13013)) | yes; results also go to stderr, and in RPC to a notification ([#13014](https://github.com/can1357/oh-my-pi/issues/13014)) |
+| Oh My Pi RPC and ACP | off, with a warning (fix pending upstream: [oh-my-pi#11834](https://github.com/can1357/oh-my-pi/pull/11834)) | yes; results also go to stderr, and in RPC to a notification ([oh-my-pi#12718](https://github.com/can1357/oh-my-pi/pull/12718)) |
 | Print (`-p`) and JSON | off, with a warning on stderr | `/unreal` waits and prints the result; the tool always runs in the foreground |
 
 In print mode, run `/unreal` in a fresh session (`--no-session`): when resuming a chat the host also prints its own last answer afterwards. Pi exits with code 1 when the job failed; Oh My Pi's print mode always exits 0.
@@ -113,7 +113,7 @@ flowchart LR
   ext -- "live steps, answer, stats" --> host
 ```
 
-In `--unreal` mode the messages you type are handled before they reach Pi's agent loop, and pi-unreal never wakes Pi's model. Slash commands and other extensions can still start Pi turns. Unreal keeps one persisted session per Pi session.
+In `--unreal` mode the messages you type are handled before they reach Pi's agent loop, and pi-unreal never wakes Pi's model. Slash commands and other extensions can still start Pi turns. Unreal's persisted session continues as long as the chat does; a fork, a different branch or an interrupted turn starts a new one, seeded with the visible history.
 
 ### Configuration
 

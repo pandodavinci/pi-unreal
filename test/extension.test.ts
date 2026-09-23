@@ -300,8 +300,8 @@ describe("branches and handoffs", () => {
 		await waitFor(() => host.notifications.some(n => n.includes("queued message for another branch was dropped")));
 		expect(answers(host)).toEqual([]); // neither answer landed on the new branch
 		const queued = host.sent.filter(s => s.message.customType === "unreal-you").map(s => (s.message.details as { turnId: string }).turnId)[1]!;
-		const cancelled = JSON.parse(fs.readFileSync(path.join(process.env.PI_UNREAL_STATE_DIR!, "cancelled", "s1.json"), "utf8"));
-		expect(cancelled).toContain(queued); // never replayed if the user returns to that branch
+		const cancelled = JSON.parse(fs.readFileSync(path.join(process.env.PI_UNREAL_STATE_DIR!, "cancelled.json"), "utf8"));
+		expect(Object.keys(cancelled)).toContain(queued); // never replayed if the user returns to that branch
 	});
 
 	test("Oh My Pi: only the command-line prompt is taken over, never other turns (skills, other extensions)", async () => {
@@ -372,5 +372,66 @@ describe("review round 7 cases", () => {
 		await host.emit("input", { text: "continue", source: "interactive" });
 		await waitFor(() => answers(host).length === 2);
 		expect((answers(host)[1]!.message.details as { body: string }).body).not.toContain("QUEUED-DROPPED");
+	});
+});
+
+describe("review round 8 cases", () => {
+	const recorded = (file: string) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
+
+	test("a queued message removed by /tree never runs, even though its parent is still on the branch", async () => {
+		const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-rec-")), "prompts");
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("delay", record);
+		const host = createFakeHost({ flags: { unreal: true } });
+		piUnreal(host.pi as never);
+		await host.emit("session_start", { reason: "startup" });
+		await host.emit("input", { text: "first A", source: "interactive" });
+		await host.emit("input", { text: "second B", source: "interactive" });
+		// Back to A's bubble: B's bubble (after it) is no longer on the branch.
+		const aBubble = host.state.branch.findIndex(entry => (entry as { details?: { text?: string } }).details?.text === "first A");
+		host.state.branch = host.state.branch.slice(0, aBubble + 1);
+		await waitFor(() => host.notifications.some(n => n.includes("queued message for another branch was dropped")));
+		await Bun.sleep(200);
+		expect(recorded(record)).toContain("first A");
+		expect(recorded(record)).not.toContain("second B");
+	});
+
+	test("forking while a message is queued: the fork never replays the dropped message", async () => {
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("delay");
+		const host = createFakeHost({ flags: { unreal: true } });
+		piUnreal(host.pi as never);
+		await host.emit("session_start", { reason: "startup" });
+		await host.emit("input", { text: "first A", source: "interactive" });
+		await host.emit("input", { text: "QUEUED-B", source: "interactive" });
+		host.state.sessionId = "fork-2"; // fork: same transcript copied, new chat id
+		await host.emit("session_start", { reason: "fork" });
+		await Bun.sleep(1_200); // A settles
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("echo");
+		await host.emit("input", { text: "continue", source: "interactive" });
+		await waitFor(() => answers(host).some(a => (a.message.details as { body: string }).body.includes("continue")));
+		const body = answers(host).map(a => (a.message.details as { body: string }).body).find(b => b.includes("continue"))!;
+		expect(body).not.toContain("QUEUED-B");
+	});
+
+	test("Oh My Pi: a command-line prompt with @file context (message at the end) is taken over", async () => {
+		process.argv = [...argv, "@requirements.md", "implement this"];
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		await host.emit("before_agent_start", { prompt: '<file name="requirements.md">be fast</file>\nimplement this' });
+		expect(host.state.aborts).toBe(1);
+		await waitFor(() => answers(host).length === 1);
+		expect((answers(host)[0]!.message.details as { body: string }).body).toContain("implement this");
+	});
+
+	test("Oh My Pi: Esc cancels a command-line prompt that is still waiting to be handed over", async () => {
+		process.argv = [...argv, "startup prompt"];
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		host.state.idle = false;
+		host.ctx.abort = () => {
+			host.state.aborts++; // stays busy for a moment
+		};
+		await host.emit("before_agent_start", { prompt: "startup prompt" });
+		expect(host.pressKey("\x1b")).toBe(true);
+		host.state.idle = true;
+		await Bun.sleep(300);
+		expect(host.sent.filter(s => s.message.customType === "unreal-you")).toEqual([]);
 	});
 });

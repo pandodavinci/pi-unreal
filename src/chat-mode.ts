@@ -68,6 +68,18 @@ const IMAGE_EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "j
 
 const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
+/**
+ * The command-line argument this prompt came from, if any. Oh My Pi builds its startup prompt as
+ * [piped stdin + "\n"] + [@file contents] + first message, so the message argument is the prompt or ends it.
+ * Flags ("-...") and file references ("@...") are not messages; each argument is taken over once.
+ */
+export function commandLinePromptArg(prompt: string, args: readonly string[], taken: ReadonlySet<string>): string | undefined {
+	if (!prompt) return undefined;
+	return args
+		.map(arg => arg.trim())
+		.find(arg => arg && !arg.startsWith("-") && !arg.startsWith("@") && !taken.has(arg) && (prompt === arg || prompt.endsWith(arg)));
+}
+
 export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: string) => void): { isUnrealMode(): boolean } {
 	const stateRoot = resolveStateRoot();
 	const provider = process.env.UNREAL_HARNESS_LLM_PROVIDER ?? "openai-codex";
@@ -84,7 +96,9 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	let shuttingDown = false;
 	/** Oh My Pi's command-line prompt skips the input hook; only that first prompt is taken over (see below). */
 	let sawTypedInput = false;
-	let startupPromptHandled = false;
+	/** Command-line arguments already taken over as prompts. */
+	const takenOverArgs = new Set<string>();
+	let pendingHandoff: { cancelled: boolean } | undefined;
 	let active:
 		| {
 				turn: Turn;
@@ -201,15 +215,21 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	 * the host copies when the chat is forked.
 	 */
 	const markCancelled = (turns: readonly Turn[]) => {
-		const current = liveCtx?.sessionManager.getSessionId();
-		for (const hostSession of new Set(turns.map(turn => turn.hostSession))) {
-			const ids = turns.filter(turn => turn.hostSession === hostSession).map(turn => turn.id);
-			try {
-				addCancelled(stateRoot, hostSession, ids);
-				if (hostSession === current && !shuttingDown) pi.appendEntry(CANCELLED_TYPE, { turnIds: ids });
-			} catch (err) {
-				debug("chat", `recording canceled turns failed: ${String(err)}`);
-			}
+		if (turns.length === 0) return;
+		try {
+			addCancelled(stateRoot, turns.map(turn => turn.id));
+		} catch (err) {
+			debug("chat", `recording canceled turns failed: ${String(err)}`);
+		}
+		// Also in the transcript shown now, if it contains any of those messages (for instance a fork that just
+		// copied them): the marker travels with the transcript even without this machine's state.
+		const ctx = liveCtx;
+		const onBranch = ctx && !shuttingDown ? turns.filter(turn => bubbleOnBranch(ctx, turn)) : [];
+		if (onBranch.length === 0) return;
+		try {
+			pi.appendEntry(CANCELLED_TYPE, { turnIds: onBranch.map(turn => turn.id) });
+		} catch (err) {
+			debug("chat", `recording canceled turns failed: ${String(err)}`);
 		}
 	};
 
@@ -235,8 +255,12 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				);
 			}
 		}
-		// The bubble may still be landing for a turn that starts right away; then its parent entry must be there.
-		if (turn.hostSession !== ctx.sessionManager.getSessionId() || !(bubbleOnBranch(ctx, turn) || onCurrentBranch(ctx, turn))) {
+		// Only run a message that is still in the conversation shown (a brand-new one may take a moment to land).
+		if (turn.hostSession === ctx.sessionManager.getSessionId() && onCurrentBranch(ctx, turn)) {
+			const deadline = Date.now() + 1_000;
+			while (!bubbleOnBranch(ctx, turn) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+		}
+		if (turn.hostSession !== ctx.sessionManager.getSessionId() || !bubbleOnBranch(ctx, turn)) {
 			// Typed on a branch the user has since left: never run it against another conversation.
 			markCancelled([turn]);
 			ctx.ui.notify("A queued message for another branch was dropped.", "info");
@@ -265,7 +289,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			unrealSession,
 			unrealHasSession: fs.existsSync(path.join(stateRoot, "sessions", `${unrealSession}.session.jsonl`)),
 			pendingTurns: new Set([turn.id, ...queue.map(queued => queued.id)]),
-			cancelledTurns: readCancelled(stateRoot, hostSession),
+			cancelledTurns: readCancelled(stateRoot),
 			maxChars: MAX_CONTEXT_CHARS,
 		});
 		const controller = new AbortController();
@@ -443,7 +467,15 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		}
 		if (!unsubscribeKeys && ctx.hasUI) {
 			// Re-registered after every session change: Oh My Pi drops terminal listeners on /new and /resume.
-			unsubscribeKeys = ctx.ui.onTerminalInput(data => (ESC_SEQUENCES.has(data) && stopActive(ctx) ? { consume: true } : undefined));
+			unsubscribeKeys = ctx.ui.onTerminalInput(data => {
+				if (!ESC_SEQUENCES.has(data)) return undefined;
+				if (pendingHandoff && !pendingHandoff.cancelled) {
+					pendingHandoff.cancelled = true;
+					ctx.ui.notify("Command-line prompt canceled.", "info");
+					return { consume: true };
+				}
+				return stopActive(ctx) ? { consume: true } : undefined;
+			});
 		}
 		if (!ticker) {
 			ticker = true;
@@ -487,17 +519,22 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	// the input hook for every prompt, and aborting here would not stop its turn anyway.
 	pi.on("before_agent_start", async (event, ctx) => {
 		bind(ctx);
-		if (!enabled || !isOhMyPi(pi) || hostMode(ctx) !== "tui" || sawTypedInput || startupPromptHandled) return undefined;
-		startupPromptHandled = true;
+		if (!enabled || !isOhMyPi(pi) || hostMode(ctx) !== "tui" || sawTypedInput) return undefined;
 		const text = (event.prompt ?? "").trim();
-		// Only the prompt the user gave on the command line; an extension's own first prompt is left alone.
-		if (!text || !process.argv.slice(2).some(arg => arg.trim() === text)) return undefined;
+		// Only a prompt the user gave on the command line; an extension's own prompt is left alone.
+		const arg = commandLinePromptArg(text, process.argv.slice(2), takenOverArgs);
+		if (arg === undefined) return undefined;
+		takenOverArgs.add(arg);
 		const hostSession = ctx.sessionManager.getSessionId();
 		const leaf = ctx.sessionManager.getLeafId();
 		ctx.abort();
 		// Oh My Pi is still "busy" here; a message posted now would steer the aborted turn. Wait until it settles,
 		// and give up rather than post into another chat or a busy host.
+		const handoff = { cancelled: false };
+		pendingHandoff = handoff;
 		void untilIdle(ctx).then(idle => {
+			if (pendingHandoff === handoff) pendingHandoff = undefined;
+			if (handoff.cancelled) return;
 			const moved = leaf !== null && !branchOf(ctx).some(entry => entry.id === leaf);
 			if (!idle || shuttingDown || moved || hostSession !== liveCtx?.sessionManager.getSessionId()) {
 				if (!shuttingDown) warn(ctx, "pi-unreal could not hand the command-line prompt to Unreal. Type it again.");
