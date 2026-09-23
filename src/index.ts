@@ -18,7 +18,7 @@ import { stateRoot as resolveStateRoot } from "./binary";
 import { registerChatMode } from "./chat-mode";
 import { pruneState } from "./state";
 import { type BridgeEvent, describe, emptyStats } from "./events";
-import { hostMode, idleMessagesReachClient, safeTimers, tell, wakeModelDelivery, withDeadline } from "./host";
+import { hostMode, idleMessagesReachClient, safeTimers, tell, wakeModelDelivery, SHUTDOWN_FORCE_WAIT_MS, SHUTDOWN_GRACE_MS, withDeadline } from "./host";
 import { formatSummary, runUnreal, type UnrealRunResult } from "./runner";
 
 type Origin = "command" | "tool";
@@ -40,9 +40,6 @@ interface Job {
 const WIDGET_KEY = "unreal";
 const MAX_LINES_PER_JOB = 200;
 const MAX_FINISHED_JOBS = 50;
-/** Oh My Pi caps session_shutdown handlers at 2s; stay well inside it. */
-const SHUTDOWN_GRACE_MS = 900;
-const SHUTDOWN_FORCE_WAIT_MS = 500;
 
 
 export default function piUnreal(pi: ExtensionAPI) {

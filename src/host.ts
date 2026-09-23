@@ -53,6 +53,13 @@ export function safeTimers(onError: (err: unknown) => void) {
 	};
 }
 
+/**
+ * Shutdown budget for a running Unreal turn: SIGINT, then SIGKILL of the tree. Oh My Pi gives session_shutdown
+ * handlers 2s; the force wait covers the runner's final process snapshot (up to 1s).
+ */
+export const SHUTDOWN_GRACE_MS = 500;
+export const SHUTDOWN_FORCE_WAIT_MS = 1_300;
+
 /** Resolves after ms without keeping the process alive. */
 export function sleep(ms: number): Promise<undefined> {
 	return new Promise(resolve => {

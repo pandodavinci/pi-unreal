@@ -70,7 +70,11 @@ export function createFakeHost(
 		registerFlag: () => {},
 		getFlag: (name: string) => opts.flags?.[name],
 		registerMessageRenderer: () => {},
-		sendMessage: (message: Sent["message"], options?: Sent["options"]) => sent.push({ message, options }),
+		// Like both hosts when idle: the message is recorded and appended to the current branch.
+		sendMessage: (message: Sent["message"], options?: Sent["options"]) => {
+			sent.push({ message, options });
+			state.branch.push({ id: `msg-${sent.length}`, type: "custom_message", ...message });
+		},
 		// Like the hosts: a custom entry on the current branch, never sent to a model.
 		appendEntry: (customType: string, data: unknown) => state.branch.push({ id: `entry-${state.branch.length}`, type: "custom", customType, data }),
 	};

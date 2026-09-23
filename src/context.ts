@@ -59,7 +59,7 @@ function answerDetails(entry: Entry): Partial<AnswerDetails> | undefined {
 	return entry.customType === ANSWER_TYPE ? (entry.details as Partial<AnswerDetails> | undefined) : undefined;
 }
 
-/** Turn ids the user canceled (Esc, or queued messages dropped with it). */
+/** Turn ids marked canceled in the transcript (copied along when the host forks the chat). */
 export function cancelledTurns(branch: readonly Entry[]): Set<string> {
 	const ids = new Set<string>();
 	for (const entry of branch) {
@@ -73,6 +73,8 @@ export function cancelledTurns(branch: readonly Entry[]): Set<string> {
 export interface SessionOwnership {
 	hostSession: string;
 	headTurn: string;
+	/** Set while a turn runs. Left behind by a crash, it means Unreal may hold a turn the transcript lacks. */
+	inflightTurn?: string;
 }
 
 /**
@@ -95,7 +97,8 @@ export function unrealSessionFor(
 	const candidate = last?.unrealSession ?? base;
 	const owner = ownership(candidate);
 	if (!owner) return last ? fresh() : candidate; // no record: only a brand-new chat may start the base session
-	return owner.hostSession === hostSessionId && owner.headTurn === last?.turnId ? candidate : fresh();
+	if (owner.inflightTurn) return fresh(); // interrupted mid-turn: its memory may be ahead of the transcript
+	return owner.hostSession === hostSessionId && owner.headTurn === (last?.turnId ?? "") ? candidate : fresh();
 }
 
 /**

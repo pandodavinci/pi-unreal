@@ -9,6 +9,7 @@ import piUnreal from "../src/index";
 import { createFakeHost, fakeRunnerExecutable, waitFor } from "./fake-host";
 
 const saved = { ...process.env };
+const argv = process.argv;
 beforeEach(() => {
 	process.env.PI_UNREAL_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-state-"));
 	delete process.env.PI_UNREAL_MODE;
@@ -16,6 +17,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	process.env = { ...saved };
+	process.argv = argv;
 });
 
 async function setup(mode: string, opts: Parameters<typeof createFakeHost>[0] = {}) {
@@ -77,7 +79,6 @@ describe("--unreal mode", () => {
 
 		// Unreal now has a session with that answer: the next turn carries nothing old.
 		unrealSessionExists("pi-s1");
-		host.state.branch = [...host.state.branch, ...host.sent.map(s => ({ type: "custom_message", ...s.message }))];
 		await host.emit("input", { text: "next", source: "interactive" });
 		await waitFor(() => answers(host).length === 2);
 		expect((answers(host)[1]!.message.details as { body: string }).body).toBe("ECHO:next");
@@ -243,6 +244,7 @@ describe("host modes", () => {
 	});
 
 	test("Oh My Pi's command-line prompt (which skips the input hook) is stopped and handed to Unreal", async () => {
+		process.argv = [...argv, "fix the tests"];
 		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
 		host.state.idle = false; // Oh My Pi is mid-setup of its own turn here
 		await host.emit("before_agent_start", { prompt: "fix the tests" });
@@ -266,11 +268,8 @@ describe("cancellation and branches", () => {
 		await host.emit("input", { text: "long task", source: "interactive" });
 		await host.emit("input", { text: "queued follow-up", source: "interactive" });
 		await Bun.sleep(300);
-		// The transcript the host now holds: both user bubbles.
-		host.state.branch = host.sent.map((s, i) => ({ id: `m${i}`, type: "custom_message", ...s.message }));
 		expect(host.pressKey("\x1b")).toBe(true);
 		await waitFor(() => answers(host).length === 1);
-		host.state.branch = [...host.state.branch, ...host.sent.slice(-1).map(s => ({ id: "a0", type: "custom_message", ...s.message }))];
 		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("echo");
 		await host.emit("input", { text: "something else", source: "interactive" });
 		await waitFor(() => answers(host).length === 2);
@@ -305,7 +304,8 @@ describe("branches and handoffs", () => {
 		expect(cancelled).toContain(queued); // never replayed if the user returns to that branch
 	});
 
-	test("Oh My Pi: only the startup prompt is taken over, never later turns (skills, other extensions)", async () => {
+	test("Oh My Pi: only the command-line prompt is taken over, never other turns (skills, other extensions)", async () => {
+		process.argv = [...argv, "startup prompt"];
 		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
 		await host.emit("input", { text: "/skill:review", source: "interactive" }); // typed: slash commands pass through
 		await host.emit("before_agent_start", { prompt: "expanded skill instructions" });
@@ -314,9 +314,14 @@ describe("branches and handoffs", () => {
 		await fresh.emit("before_agent_start", { prompt: "startup prompt" });
 		await fresh.emit("before_agent_start", { prompt: "a later turn" });
 		expect(fresh.state.aborts).toBe(1);
+		// An extension's own first prompt, not on the command line, is left to the host.
+		const extension = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		await extension.emit("before_agent_start", { prompt: "an extension's workflow prompt" });
+		expect(extension.state.aborts).toBe(0);
 	});
 
 	test("Oh My Pi: a startup handoff is not delivered into a chat the user switched to meanwhile", async () => {
+		process.argv = [...argv, "startup prompt"];
 		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
 		host.state.idle = false;
 		const abort = host.ctx.abort;
@@ -339,5 +344,33 @@ describe("branches and handoffs", () => {
 			content: { text: string }[];
 		};
 		expect(result.content[0]!.text).toContain("ECHO:t");
+	});
+});
+
+describe("review round 7 cases", () => {
+	test("/tree back to the entry the message followed (dropping the message) keeps the answer out", async () => {
+		const host = await setup("slow", { flags: { unreal: true } });
+		host.state.branch = [{ id: "root", type: "message", message: { role: "user", content: "start" } }];
+		await host.emit("input", { text: "long task", source: "interactive" });
+		await Bun.sleep(300);
+		host.state.branch = host.state.branch.slice(0, 1); // back to "root": the message itself is gone from this branch
+		expect(host.pressKey("\x1b")).toBe(true);
+		await waitFor(() => host.notifications.some(n => n.includes("another chat or branch")));
+		expect(answers(host)).toEqual([]);
+	});
+
+	test("a fork copies the cancellation marker with the transcript, so a dropped message stays dropped there", async () => {
+		const host = await setup("slow", { flags: { unreal: true } });
+		await host.emit("input", { text: "long task", source: "interactive" });
+		await host.emit("input", { text: "QUEUED-DROPPED", source: "interactive" });
+		await Bun.sleep(300);
+		expect(host.pressKey("\x1b")).toBe(true);
+		await waitFor(() => answers(host).length === 1);
+		host.state.sessionId = "fork-1"; // same visible history, new chat id: the per-chat file does not apply
+		await host.emit("session_start", { reason: "fork" });
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("echo");
+		await host.emit("input", { text: "continue", source: "interactive" });
+		await waitFor(() => answers(host).length === 2);
+		expect((answers(host)[1]!.message.details as { body: string }).body).not.toContain("QUEUED-DROPPED");
 	});
 });

@@ -73,6 +73,12 @@ describe("unrealSessionFor", () => {
 		);
 	});
 
+	test("a session left mid-turn by a crash is not trusted: its memory may be ahead of the transcript", () => {
+		expect(
+			unrealSessionFor(branch, "s1", owners({ "pi-s1": { hostSession: "s1", headTurn: "t1", inflightTurn: "t2" } as never }), fresh),
+		).toBe("pi-s1-fresh");
+	});
+
 	test("an answer whose session has no ownership record (older version) is re-seeded in a fresh session", () => {
 		expect(unrealSessionFor(branch, "s1", owners({}), fresh)).toBe("pi-s1-fresh");
 	});

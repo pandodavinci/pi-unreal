@@ -81,7 +81,7 @@ interface Proc {
 
 const PS_ARGS = ["-A", "-o", "pid=,ppid=,pgid="];
 /** Bounds a snapshot, so the final cleanup can always wait for one that is in flight. */
-const PS_TIMEOUT_MS = 2_000;
+const PS_TIMEOUT_MS = 1_000;
 
 /** All live descendants of rootPid (pid + process group). Blocks for a `ps` call: use at shutdown only. */
 export function descendantsOf(rootPid: number): Proc[] {

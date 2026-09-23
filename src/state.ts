@@ -87,6 +87,7 @@ export async function pruneState(root: string, now = Date.now()): Promise<number
 export interface SessionOwnership {
 	hostSession: string;
 	headTurn: string;
+	inflightTurn?: string;
 }
 
 const safeName = (id: string) => id.replace(/[^A-Za-z0-9._-]/g, "_");
@@ -110,8 +111,25 @@ export function readOwnership(root: string, unrealSession: string): SessionOwner
 	return readJson<SessionOwnership>(path.join(root, "sessions", `${safeName(unrealSession)}.owner.json`));
 }
 
-export function writeOwnership(root: string, unrealSession: string, ownership: SessionOwnership) {
-	writeJson(path.join(root, "sessions", `${safeName(unrealSession)}.owner.json`), ownership);
+export function writeOwnership(root: string, unrealSession: string, ownership: SessionOwnership | undefined) {
+	const file = path.join(root, "sessions", `${safeName(unrealSession)}.owner.json`);
+	if (ownership) writeJson(file, ownership);
+	else fsSync.rmSync(file, { force: true });
+}
+
+/** Where a host chat's pasted images go (pruned together, by last use). */
+export function imagesDir(root: string, hostSession: string): string {
+	return path.join(root, "images", safeName(hostSession));
+}
+
+/** Mark a host chat's records as in use, so pruning (by last use) keeps them while the chat is active. */
+export function touchChat(root: string, hostSession: string) {
+	const now = new Date();
+	for (const target of [path.join(root, "cancelled", `${safeName(hostSession)}.json`), imagesDir(root, hostSession)]) {
+		try {
+			fsSync.utimesSync(target, now, now);
+		} catch {}
+	}
 }
 
 /** Turns of a host chat that were canceled or dropped; they are never replayed to Unreal. */
