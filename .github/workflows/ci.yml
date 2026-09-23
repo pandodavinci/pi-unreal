@@ -43,7 +43,8 @@ jobs:
         with:
           node-version: 22
       - run: bun install
-      - run: bun add -g @oh-my-pi/pi-coding-agent
+      # Pinned for reproducible runs; bump deliberately after testing a new release.
+      - run: bun add -g @oh-my-pi/pi-coding-agent@18.2.11
       - run: echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
       - run: omp --version
       - run: bun run e2e:omp

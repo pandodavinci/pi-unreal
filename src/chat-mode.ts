@@ -1,12 +1,14 @@
 /**
  * Unreal chat mode: every message you type goes to Unreal Agent instead of the host's own agent loop.
- * Pi / Oh My Pi is only the terminal UI: it makes zero model calls while this mode is on.
+ * Pi / Oh My Pi is only the terminal UI while this mode is on.
  *
- * - Plain messages are intercepted in the `input` hook (handled), so the host's harness never runs.
+ * - Plain messages are intercepted in the `input` hook (handled), so the host's harness never runs. Oh My Pi
+ *   skips that hook for a prompt given on its command line, so its turn is stopped in `before_agent_start`
+ *   and the prompt goes to Unreal instead.
  * - Slash commands (/exit, /new, /harness, ...) and !bash still go to the host.
- * - One Unreal session per host session (session_id = pi-<id>), so Unreal remembers the conversation.
- *   /new starts a fresh Unreal session.
- * - Esc cancels the running Unreal turn. Messages sent while it runs are queued.
+ * - Unreal keeps a persisted session per conversation branch, so it remembers the conversation; /new, a fork
+ *   or going back with /tree starts a fresh one, seeded with the visible history.
+ * - Esc cancels the running Unreal turn and the queued ones. Messages sent while it runs are queued.
  * - Replies stream live (runner include_partial_messages) in a widget, then land in the transcript.
  * - Pasted images are saved to files and handed to Unreal's ViewImage tool by absolute path.
  *
@@ -19,32 +21,30 @@ import type { ExtensionAPI, ExtensionContext, InputEvent } from "@earendil-works
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { stateRoot as resolveStateRoot } from "./binary";
+import {
+	ANSWER_TYPE,
+	type AnswerDetails,
+	CANCELLED_TYPE,
+	type Entry,
+	USER_TYPE,
+	type UserDetails,
+	unrealSessionFor,
+	unseenContext,
+} from "./context";
 import { inspectDotEnv } from "./env";
 import { describe } from "./events";
-import { handledInput, ohMyPiSkipsInputHooks, safeTimers, withDeadline } from "./host";
-import { runUnreal, type UnrealRunResult } from "./runner";
+import { chatModeSupported, handledInput, hostMode, isOhMyPi, safeTimers, warn, withDeadline } from "./host";
+import { runUnreal } from "./runner";
 
-const USER_TYPE = "unreal-you";
-const ANSWER_TYPE = "unreal-answer";
 const WIDGET_KEY = "unreal-chat";
 const STATUS_KEY = "unreal-harness";
 const ESC_SEQUENCES = new Set(["\x1b", "\x1b[27u", "\x1b[27;1u"]);
 const SHUTDOWN_GRACE_MS = 900;
 const SHUTDOWN_FORCE_WAIT_MS = 500;
-
-interface AnswerDetails {
-	/** What the user sees; `content` is the model-facing version, labeled for the host's model. */
-	body: string;
-	/** True when the runner persisted the prompt (so Unreal's session contains this turn). */
-	delivered: boolean;
-	turnId: string;
-	/** Host entries whose content was sent to Unreal as context with this turn. */
-	contextIds: string[];
-	status: UnrealRunResult["status"];
-	footer: string;
-	steps: string[];
-	error?: string;
-}
+/** Cap on conversation carried over to Unreal as context. */
+const MAX_CONTEXT_CHARS = 12_000;
+const UNSUPPORTED_MODE =
+	"pi-unreal: --unreal needs the interactive terminal (or Pi's RPC mode); in this mode messages go to the built-in model. /unreal <task> and the unreal_delegate tool still work.";
 
 type ImageContent = NonNullable<InputEvent["images"]>[number];
 
@@ -52,7 +52,8 @@ interface Turn {
 	id: string;
 	text: string;
 	images: string[];
-	sessionId: string;
+	/** Host session the message was typed in; the answer is only posted there. */
+	hostSession: string;
 }
 
 interface LiveView {
@@ -60,28 +61,6 @@ interface LiveView {
 	setHeader(text: string): void;
 	setSteps(text: string): void;
 	setBody(text: string): void;
-}
-
-/** Session entry shapes shared by Pi and Oh My Pi (`message` and `custom_message`). */
-interface Entry {
-	id?: string;
-	type?: string;
-	customType?: string;
-	content?: unknown;
-	details?: unknown;
-	message?: { role?: string; content?: unknown };
-}
-
-/** Cap on conversation carried over from the host when switching to Unreal. */
-const MAX_CONTEXT_CHARS = 12_000;
-
-function textOf(content: unknown): string {
-	if (typeof content === "string") return content.trim();
-	if (!Array.isArray(content)) return "";
-	return content
-		.map(block => ((block as { type?: string }).type === "text" ? String((block as { text?: unknown }).text ?? "") : ""))
-		.join("")
-		.trim();
 }
 
 const IMAGE_EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
@@ -101,8 +80,11 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	let liveCtx: ExtensionContext | undefined;
 	let unsubscribeKeys: (() => void) | undefined;
 	const queue: Turn[] = [];
+	/** Unreal session id -> turn id of its latest delivered answer (this process). */
+	const heads = new Map<string, string>();
 	let active:
 		| {
+				turn: Turn;
 				controller: AbortController;
 				force: AbortController;
 				done: Promise<unknown>;
@@ -176,7 +158,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		}, 50);
 	};
 
-	pi.registerMessageRenderer<{ text: string }>(USER_TYPE, (message, _opts, theme) => {
+	pi.registerMessageRenderer<UserDetails>(USER_TYPE, (message, _opts, theme) => {
 		const box = new Container();
 		const text = message.details?.text ?? String(message.content);
 		box.addChild(new Spacer(1));
@@ -202,6 +184,24 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		// transcript immediately without starting a turn. (Pi's `nextTurn` would hide it until the next prompt.)
 		pi.sendMessage({ customType, content, display: true, details, attribution: "agent" } as never);
 
+	const branchOf = (ctx: ExtensionContext): Entry[] => {
+		try {
+			return ctx.sessionManager.getBranch() as Entry[];
+		} catch {
+			return [];
+		}
+	};
+
+	/** Persist that these turns were canceled, so they are never replayed to Unreal as context. */
+	const markCancelled = (turnIds: string[]) => {
+		if (turnIds.length === 0) return;
+		try {
+			pi.appendEntry(CANCELLED_TYPE, { turnIds });
+		} catch (err) {
+			debug("chat", `appendEntry failed: ${String(err)}`);
+		}
+	};
+
 	const runTurn = async (turn: Turn) => {
 		const ctx = liveCtx!;
 		if (!dotEnvNoticeShown.has(ctx.cwd)) {
@@ -211,28 +211,38 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				ctx.ui.notify(
 					process.env.PI_UNREAL_TRUST_DOTENV === "1"
 						? `This folder has a .env (${dotEnv.names.length} vars). PI_UNREAL_TRUST_DOTENV=1: Unreal Agent will load it; model credentials and endpoints stay pinned.`
-						: `This folder has a .env (${dotEnv.names.length} vars). pi-unreal keeps it away from Unreal Agent. Set PI_UNREAL_TRUST_DOTENV=1 if you trust this repo.`,
+						: `This folder has a .env (${dotEnv.names.length} vars). pi-unreal neutralizes it for Unreal Agent. Set PI_UNREAL_TRUST_DOTENV=1 if you trust this repo.`,
 					"info",
 				);
 			}
 		}
+		const branch = branchOf(ctx);
+		const unrealSession = unrealSessionFor(branch, ctx.sessionManager.getSessionId(), heads, () => `pi-${ctx.sessionManager.getSessionId()}-${randomUUID().slice(0, 8)}`);
+		const context = unseenContext(branch, {
+			unrealSession,
+			unrealHasSession: fs.existsSync(path.join(stateRoot, "sessions", `${unrealSession}.session.jsonl`)),
+			pendingTurns: new Set([turn.id, ...queue.map(queued => queued.id)]),
+			maxChars: MAX_CONTEXT_CHARS,
+		});
 		const controller = new AbortController();
 		const force = new AbortController();
 		const steps: string[] = [];
 		const startedAt = Date.now();
 		const turnState = { liveText: "", liveItem: "", thinking: "" };
-		const context = conversationContext(ctx, turn);
-		const task = withContext(context.text, withImages(turn.text, turn.images));
 		const done = runUnreal({
-			task,
+			task: withContext(context.text, withImages(turn.text, turn.images)),
 			cwd: ctx.cwd,
 			stateDir: path.join(stateRoot, "chat", `${new Date().toISOString().replace(/[:.]/g, "-")}`),
-			sessionId: turn.sessionId,
+			sessionId: unrealSession,
 			sessionDir: path.join(stateRoot, "sessions"),
 			includePartials: true,
 			signal: controller.signal,
 			forceSignal: force.signal,
 			debugLog: msg => debug("chat", msg),
+			onStatus: message => {
+				steps.push(`· ${message}`);
+				showProgress();
+			},
 			onEvent: event => {
 				const live = active ?? turnState;
 				if (event.kind === "partial") {
@@ -260,7 +270,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				showProgress();
 			},
 		});
-		active = { controller, force, done, startedAt, steps, ...turnState };
+		active = { turn, controller, force, done, startedAt, steps, ...turnState };
 		showStatus();
 		showProgress();
 		const result = await done;
@@ -268,6 +278,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		showProgress();
 		showStatus();
 
+		if (result.promptPersisted) heads.set(unrealSession, turn.id);
 		const s = result.stats;
 		const footer = [
 			result.status === "completed" ? null : result.status,
@@ -281,10 +292,11 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const error = result.status === "completed" || result.status === "cancelled" ? undefined : result.errorMessage;
 		const body = result.finalText || (result.status === "cancelled" ? "_stopped_" : "");
 		// Different session now (/new while running): keep the transcript clean, just notify.
-		if (turn.sessionId !== `pi-${liveCtx?.sessionManager.getSessionId()}`) {
+		if (turn.hostSession !== liveCtx?.sessionManager.getSessionId()) {
 			liveCtx?.ui.notify(`unreal answer for a previous session dropped (${result.status})`, "info");
 			return;
 		}
+		if (result.status === "cancelled") markCancelled([turn.id]);
 		// These messages are also in the host model's context (e.g. after /harness pi). Label them so it knows
 		// Unreal already handled them and does not pick up a stopped request as unfinished work.
 		const forModel =
@@ -295,6 +307,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			body,
 			delivered: result.promptPersisted,
 			turnId: turn.id,
+			unrealSession,
 			contextIds: result.promptPersisted ? context.ids : [],
 			status: result.status,
 			footer,
@@ -336,93 +349,49 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		paths.length
 			? `${text}\n\nThe user attached ${paths.length} image(s). Look at them with the ViewImage tool before answering:\n${paths.map(p => `- ${p}`).join("\n")}`
 			: text;
-
-	/**
-	 * What Unreal has not seen yet. If Unreal has no session for this chat (new, forked or resumed chat), that
-	 * is the whole visible history. Otherwise it is every entry that no delivered turn recorded as seen:
-	 * messages the host's model handled, other extensions' messages (e.g. background results, including ones
-	 * that arrived during an earlier turn) and messages of ours that never reached Unreal. Turns still queued
-	 * are excluded. Keeps the last MAX_CONTEXT_CHARS characters.
-	 */
-	const conversationContext = (ctx: ExtensionContext, turn: Turn): { text: string; ids: string[] } => {
-		let branch: Entry[];
-		try {
-			branch = ctx.sessionManager.getBranch() as Entry[];
-		} catch {
-			return { text: "", ids: [] };
-		}
-		const key = (entry: Entry, index: number) => entry.id ?? `index:${index}`;
-		const unrealHasSession = fs.existsSync(path.join(stateRoot, "sessions", `${turn.sessionId}.session.jsonl`));
-		const seen = new Set<string>();
-		const deliveredTurns = new Set<string>();
-		if (unrealHasSession) {
-			branch.forEach((entry, index) => {
-				const details = entry.details as Partial<AnswerDetails> | undefined;
-				if (entry.customType !== ANSWER_TYPE || !details?.delivered) return;
-				seen.add(key(entry, index));
-				if (details.turnId) deliveredTurns.add(details.turnId);
-				for (const id of details.contextIds ?? []) seen.add(id);
-			});
-		}
-		const pending = new Set([turn.id, ...queue.map(queued => queued.id)]);
-		const lines: string[] = [];
-		const ids: string[] = [];
-		branch.forEach((entry, index) => {
-			const id = key(entry, index);
-			if (seen.has(id)) return;
-			let line: string | undefined;
-			if (entry.type === "message" && entry.message) {
-				const { role, content } = entry.message;
-				const text = textOf(content);
-				if (text && (role === "user" || role === "assistant")) line = `${role === "user" ? "User" : "Pi"}: ${text}`;
-			} else if (entry.customType === USER_TYPE) {
-				const details = entry.details as { text?: string; turnId?: string } | undefined;
-				if (details?.turnId && (pending.has(details.turnId) || deliveredTurns.has(details.turnId))) return;
-				const label = unrealHasSession ? "User (a message that did not reach you)" : "User (to you, Unreal)";
-				line = `${label}: ${details?.text ?? textOf(entry.content)}`;
-			} else if (entry.customType === ANSWER_TYPE) {
-				const details = entry.details as Partial<AnswerDetails> | undefined;
-				if (details?.delivered && details.body) line = `You (Unreal): ${details.body}`;
-			} else {
-				const text = textOf(entry.content);
-				if (entry.customType && text) line = `[${entry.customType}] ${text}`;
-			}
-			if (line) {
-				lines.push(line);
-				ids.push(id);
-			}
-		});
-		const joined = lines.join("\n\n");
-		return { text: joined.length > MAX_CONTEXT_CHARS ? `…${joined.slice(-MAX_CONTEXT_CHARS)}` : joined, ids };
-	};
 	const withContext = (context: string, text: string) =>
 		context
 			? `Earlier in this chat, not yet in your session (some of it handled by another agent, Pi). Use it as context:\n\n${context}\n\n---\n\n${text}`
 			: text;
+
+	const untilIdle = async (ctx: ExtensionContext, timeoutMs = 10_000) => {
+		const deadline = Date.now() + timeoutMs;
+		while (!ctx.isIdle() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+	};
+
+	/** Show the message in the transcript and queue it for Unreal. */
+	const route = async (ctx: ExtensionContext, text: string, images: ImageContent[] | undefined) => {
+		const saved = images?.length ? await saveImages(images) : [];
+		const shown = saved.length ? `${text}  [${saved.length} image${saved.length > 1 ? "s" : ""}]` : text;
+		const turnId = randomUUID();
+		post(USER_TYPE, `[User message sent to Unreal Agent, which handles it]\n${shown}`, { text: shown, turnId } satisfies UserDetails);
+		queue.push({ id: turnId, text, images: saved, hostSession: ctx.sessionManager.getSessionId() });
+		void pump();
+	};
+
+	const stopActive = (ctx: ExtensionContext) => {
+		if (!active) return false;
+		active.controller.abort();
+		markCancelled(queue.map(turn => turn.id));
+		queue.length = 0;
+		ctx.ui.notify("Stopping unreal…", "info");
+		return true;
+	};
 
 	const bind = (ctx: ExtensionContext) => {
 		liveCtx = ctx;
 		if (!flagApplied) {
 			flagApplied = true;
 			if (pi.getFlag("unreal") === true) enabled = true;
-			if (enabled && ohMyPiSkipsInputHooks(pi)) {
-				// Say so instead of letting Oh My Pi's own model answer while the status claims Unreal.
+			if (enabled && !chatModeSupported(pi, hostMode(ctx))) {
+				// Say so instead of letting the host's own model answer while the status claims Unreal.
 				enabled = false;
-				ctx.ui.notify(
-					"pi-unreal: Oh My Pi does not pass messages to extensions in this mode (print/JSON/RPC/ACP), so --unreal is off and messages go to Oh My Pi's model. /unreal <task> works here; --unreal works in the interactive terminal.",
-					"warning",
-				);
+				warn(ctx, UNSUPPORTED_MODE);
 			}
 		}
 		if (!unsubscribeKeys && ctx.hasUI) {
 			// Re-registered after every session change: Oh My Pi drops terminal listeners on /new and /resume.
-			unsubscribeKeys = ctx.ui.onTerminalInput(data => {
-				if (!active || !ESC_SEQUENCES.has(data)) return undefined;
-				active.controller.abort();
-				queue.length = 0;
-				ctx.ui.notify("Stopping unreal…", "info");
-				return { consume: true };
-			});
+			unsubscribeKeys = ctx.ui.onTerminalInput(data => (ESC_SEQUENCES.has(data) && stopActive(ctx) ? { consume: true } : undefined));
 		}
 		if (!ticker) {
 			ticker = true;
@@ -454,13 +423,26 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			ctx.ui.notify("Pi is still finishing a turn. Send your message again in a moment.", "warning");
 			return handledInput();
 		}
-		const images = event.images?.length ? await saveImages(event.images) : [];
-		const shown = images.length ? `${text}  [${images.length} image${images.length > 1 ? "s" : ""}]` : text;
-		const turnId = randomUUID();
-		post(USER_TYPE, `[User message sent to Unreal Agent, which handles it]\n${shown}`, { text: shown, turnId });
-		queue.push({ id: turnId, text, images, sessionId: `pi-${ctx.sessionManager.getSessionId()}` });
-		void pump();
+		await route(ctx, text, event.images);
 		return handledInput();
+	});
+
+	// Oh My Pi sends a prompt given on its command line straight to its agent loop, skipping the input hook.
+	// Its turn can be stopped here, before any model call, and the prompt handed to Unreal instead. (Pi runs the
+	// input hook for every prompt, and aborting here would not stop its turn.)
+	pi.on("before_agent_start", async (event, ctx) => {
+		bind(ctx);
+		if (!enabled || !isOhMyPi(pi) || hostMode(ctx) !== "tui") return undefined;
+		const text = (event.prompt ?? "").trim();
+		if (!text && !event.images?.length) return undefined;
+		ctx.abort();
+		// Oh My Pi is still "busy" here; a message posted now would steer the aborted turn. Wait until it settles.
+		void untilIdle(ctx).then(() => {
+			// Oh My Pi restores an interrupted prompt into the editor; it has been handed to Unreal, so clear it.
+			if (ctx.hasUI && ctx.ui.getEditorText?.().trim() === text) ctx.ui.setEditorText?.("");
+			return route(ctx, text, event.images as ImageContent[] | undefined);
+		});
+		return undefined;
 	});
 
 	pi.registerCommand("harness", {
@@ -478,8 +460,8 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				ctx.ui.notify(`Unknown harness "${args.trim()}". Use /harness unreal or /harness pi.`, "warning");
 				return;
 			}
-			if (next && ohMyPiSkipsInputHooks(pi)) {
-				ctx.ui.notify("Oh My Pi does not pass messages to extensions in this mode. Use /unreal <task>, or the interactive terminal.", "warning");
+			if (next && !chatModeSupported(pi, hostMode(ctx))) {
+				warn(ctx, UNSUPPORTED_MODE);
 				return;
 			}
 			// Never let both agents work on the same chat at once.

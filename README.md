@@ -21,13 +21,6 @@
   <img src="https://img.shields.io/badge/Unreal%20Agent-runner-24292F?style=flat-square" alt="Unreal Agent runner" />
 </p>
 
-### Demo
-
-<!-- Add the recording at docs/demo.gif, then replace this comment with: ![pi-unreal demo](docs/demo.gif) -->
-
-> [!NOTE]
-> Demo recording coming soon (`docs/demo.gif`).
-
 ## Features
 
 - **Unreal as the harness.** Start Pi with `--unreal` and every message you type goes to Unreal Agent instead of Pi's model. `/harness pi` hands the chat back to Pi, and Unreal is caught up on what it missed when you switch again.
@@ -87,17 +80,24 @@ Pi stays interactive. `/unreal-jobs` shows progress, `/unreal-cancel` stops the 
 
 | In `--unreal` mode | |
 | --- | --- |
-| Type a message | Unreal answers. It remembers the conversation, and is caught up on anything it missed: messages Pi handled, background results, or a forked chat's history (the last 12,000 characters). |
+| Type a message | Unreal answers. It remembers the conversation, and is caught up on anything it missed: messages Pi handled, background results, or a forked chat's history (the last 12,000 characters). Going back with `/tree` or forking starts a fresh Unreal session for that branch. |
 | Paste an image (Ctrl+V) | Unreal opens it with its ViewImage tool. |
-| Type while it works | Messages queue and run in order. |
+| Type while it works | Messages queue and run in order. Esc stops the current one and drops the queue. |
 | `/harness pi`, `/harness unreal` | Switch who answers, in the same chat. Refused while the other side is still working. |
 
-Slash commands and `!bash` always go to Pi. With released Pi 0.87.1, put a one-shot prompt before the flag (`pi "fix the tests" --unreal`): Pi's parser otherwise reads the prompt as the flag's value.
+Slash commands and `!bash` always go to Pi. A prompt on the command line goes to Unreal too; with released Pi 0.87.1, put it before the flag (`pi "fix the tests" --unreal`), since Pi's parser otherwise reads it as the flag's value.
+
+| Mode | `--unreal` | `/unreal`, `unreal_delegate` |
+| --- | --- | --- |
+| Interactive terminal (Pi, Oh My Pi) | yes | yes |
+| Pi RPC | yes | yes |
+| Oh My Pi RPC | off, with a warning ([oh-my-pi#13013](https://github.com/can1357/oh-my-pi/issues/13013)) | yes; results also arrive as notifications ([#13014](https://github.com/can1357/oh-my-pi/issues/13014)) |
+| Print (`-p`) and JSON | off, with a warning on stderr | `/unreal` waits and prints the result; the tool works |
 
 | Background commands | |
 | --- | --- |
 | `/unreal <task>` | Start a background job. |
-| `/unreal-jobs` | List jobs and their latest steps. |
+| `/unreal-jobs` | List jobs; pick one to show its full result in the chat. |
 | `/unreal-cancel [id\|all]` | Stop a job (default: the most recent). |
 
 ### How it works
@@ -123,7 +123,7 @@ In `--unreal` mode the messages you type are handled before they reach Pi's agen
 | `UNREAL_AGENT_RUNNER` | downloaded release | Use your own `unreal-agent-runner` build |
 | `PI_UNREAL_MODE=1` | off | Same as `--unreal` |
 | `PI_UNREAL_THINKING` | runner default (`high`) | `low`, `medium`, `high`, `xhigh`, `max` |
-| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images |
+| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images. Logs, job output and images are removed after 14 days, unused Unreal sessions after 60. |
 | `PI_UNREAL_TRUST_DOTENV=1` | off | Let a trusted project's `.env` reach Unreal (model credentials, endpoints and proxies stay pinned) |
 | `PI_UNREAL_DEBUG=1` | off | Write every runner event to `<state>/debug.log` (private file) |
 
@@ -138,7 +138,6 @@ Set these in your shell, not in a project's `.env`: by default pi-unreal neutral
 ### Limitations
 
 - Unreal uses its own tools (Bash, ViewImage, skills in `.harness/skills`). Pi's tools, skills and MCP servers are not available to it.
-- Oh My Pi runs extension input hooks only in its interactive terminal, so `--unreal` is off (with a warning) in `omp -p`, `--mode json`, `rpc` and `acp` ([oh-my-pi#13013](https://github.com/can1357/oh-my-pi/issues/13013)). `/unreal <task>` works everywhere; in those modes its result arrives as a notification ([oh-my-pi#13014](https://github.com/can1357/oh-my-pi/issues/13014)). Pi supports `--unreal` in RPC mode.
 - Commands are tracked by polling Unreal's process tree 4 times a second. A command started and orphaned by Unreal in the instant before it exits (on a crash, or while stopping) can survive cleanup.
 - Tested by hand on Pi 0.87.1 and Oh My Pi 18.2.8 to 18.2.11 (macOS arm64). CI runs the test suite on macOS and Linux, loads the plugin on Node, and drives the real `pi` and `omp` binaries end to end.
 

@@ -63,19 +63,29 @@ export function sleep(ms: number): Promise<undefined> {
 
 export const withDeadline = <T>(promise: Promise<T>, ms: number) => Promise.race([promise, sleep(ms)]);
 
+export type HostMode = "tui" | "rpc" | "json" | "print";
+
+/** The host's run mode. Both hosts expose ctx.mode; older builds without it are interactive. */
+export function hostMode(ctx: unknown): HostMode {
+	return ((ctx as { mode?: HostMode }).mode ?? "tui") as HostMode;
+}
+
 /**
- * Oh My Pi only runs extension `input` handlers in its interactive terminal UI; in print, JSON, RPC and ACP
- * modes a prompt goes straight to its agent loop, so --unreal cannot intercept it. Pi runs them in RPC too.
+ * Where --unreal can take over typed messages. Pi runs extension input hooks for every prompt, so its TUI and
+ * RPC modes work. Oh My Pi runs them only in its TUI (can1357/oh-my-pi#13013). Print and JSON modes exit
+ * after one prompt, before an Unreal turn could finish.
  */
-export function ohMyPiSkipsInputHooks(pi: ExtensionAPI, argv: readonly string[] = process.argv): boolean {
-	if (!isOhMyPi(pi)) return false;
-	const args = argv.slice(2);
-	if (args[0] === "acp") return true;
-	for (let i = 0; i < args.length; i++) {
-		const arg = args[i]!;
-		if (arg === "-p" || arg === "--print") return true;
-		const mode = arg === "--mode" ? args[i + 1] : arg.startsWith("--mode=") ? arg.slice("--mode=".length) : undefined;
-		if (mode !== undefined && mode !== "text") return true;
-	}
-	return false;
+export function chatModeSupported(pi: ExtensionAPI, mode: HostMode): boolean {
+	return isOhMyPi(pi) ? mode === "tui" : mode === "tui" || mode === "rpc";
+}
+
+/** Oh My Pi appends idle extension messages without emitting them outside its TUI (can1357/oh-my-pi#13014). */
+export function idleMessagesReachClient(pi: ExtensionAPI, mode: HostMode): boolean {
+	return !isOhMyPi(pi) || mode === "tui";
+}
+
+/** A warning the user sees in every mode: print and JSON modes have no UI, so it goes to stderr there. */
+export function warn(ctx: { hasUI: boolean; ui: { notify(message: string, type?: "info" | "warning" | "error"): void } }, message: string) {
+	if (ctx.hasUI) ctx.ui.notify(message, "warning");
+	else process.stderr.write(`${message}\n`);
 }

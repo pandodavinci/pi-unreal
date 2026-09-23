@@ -16,8 +16,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { stateRoot as resolveStateRoot } from "./binary";
 import { registerChatMode } from "./chat-mode";
+import { pruneState } from "./state";
 import { type BridgeEvent, describe, emptyStats } from "./events";
-import { ohMyPiSkipsInputHooks, safeTimers, wakeModelDelivery, withDeadline } from "./host";
+import { hostMode, idleMessagesReachClient, safeTimers, wakeModelDelivery, withDeadline } from "./host";
 import { formatSummary, runUnreal, type UnrealRunResult } from "./runner";
 
 type Origin = "command" | "tool";
@@ -38,6 +39,7 @@ interface Job {
 
 const WIDGET_KEY = "unreal";
 const MAX_LINES_PER_JOB = 200;
+const MAX_FINISHED_JOBS = 50;
 /** Oh My Pi caps session_shutdown handlers at 2s; stay well inside it. */
 const SHUTDOWN_GRACE_MS = 900;
 const SHUTDOWN_FORCE_WAIT_MS = 500;
@@ -111,9 +113,9 @@ export default function piUnreal(pi: ExtensionAPI) {
 		// must stay idle; there the result is only shown.
 		if (job.origin === "tool" && !chat.isUnrealMode()) pi.sendMessage(message, wakeModelDelivery(pi));
 		else pi.sendMessage(message);
-		// Oh My Pi's print/JSON/RPC/ACP modes append such a message without emitting it to the client, so show the
-		// result as a notification there too.
-		if (job.origin === "command" && ohMyPiSkipsInputHooks(pi)) {
+		// Outside its TUI, Oh My Pi appends such a message without emitting it to the client (oh-my-pi#13014),
+		// so show the result as a notification there too.
+		if (job.origin === "command" && liveCtx && !idleMessagesReachClient(pi, hostMode(liveCtx))) {
 			liveCtx?.ui.notify(`[unreal ${job.id}] ${formatSummary(job.task, result)}`, result.status === "completed" ? "info" : "error");
 		}
 	};
@@ -138,6 +140,12 @@ export default function piUnreal(pi: ExtensionAPI) {
 			return;
 		}
 		sendResult(job, result);
+	};
+
+	/** Keep the most recent finished jobs only. */
+	const pruneFinishedJobs = () => {
+		const finished = [...jobs.values()].filter(j => j.result);
+		for (const j of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_JOBS))) jobs.delete(j.id);
 	};
 
 	const startJob = (task: string, origin: Origin, ctx: ExtensionContext, signal?: AbortSignal, onEvent?: (line: string) => void) => {
@@ -169,6 +177,11 @@ export default function piUnreal(pi: ExtensionAPI) {
 			signal: controller.signal,
 			forceSignal: force.signal,
 			debugLog: msg => debug(id, msg),
+			onStatus: message => {
+				job.lines.push(`· ${message}`);
+				onEvent?.(`· ${message}`);
+				refreshUi();
+			},
 			onEvent: (event: BridgeEvent) => {
 				if (event.kind === "partial") return;
 				const line = describe(event);
@@ -196,6 +209,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 			)
 			.then(result => {
 				job.result = result;
+				pruneFinishedJobs();
 				signal?.removeEventListener("abort", forward);
 				debug(id, `done status=${result.status} exit=${result.exitCode} ${JSON.stringify(result.stats)}`);
 				refreshUi();
@@ -213,8 +227,14 @@ export default function piUnreal(pi: ExtensionAPI) {
 		return job;
 	};
 
+	let pruned = false;
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
+		if (!pruned) {
+			pruned = true;
+			// In the background: never delays startup.
+			void pruneState(stateRoot).then(removed => removed && debug("state", `pruned ${removed} expired entries`));
+		}
 	});
 	pi.on("agent_end", async (_event, ctx) => {
 		liveCtx = ctx;
@@ -230,6 +250,16 @@ export default function piUnreal(pi: ExtensionAPI) {
 				return;
 			}
 			const job = startJob(task, "command", ctx);
+			const mode = hostMode(ctx);
+			if (mode === "print" || mode === "json") {
+				// The host exits once this command returns, which would cancel the job: wait for it and print the
+				// result. In print mode it is the command's output, so it goes to stdout (fd 1 directly: Pi reroutes
+				// extension writes to process.stdout onto stderr there). In JSON mode stdout is the event stream, so
+				// it goes to stderr.
+				const result = await job.done;
+				fs.writeSync(mode === "print" ? 1 : 2, `${formatSummary(job.task, result)}\n`);
+				return;
+			}
 			ctx.ui.notify(`unreal ${job.id} started. /unreal-jobs to inspect, /unreal-cancel ${job.id} to stop.`, "info");
 			void job.done.then(result => deliver(job, result));
 		},
@@ -244,13 +274,26 @@ export default function piUnreal(pi: ExtensionAPI) {
 				return;
 			}
 			const here = ctx.sessionManager.getSessionId();
-			const rows = [...jobs.values()].flatMap(j => {
+			const rows = [...jobs.values()].reverse().map(j => {
 				const state = j.result ? `${j.result.status} in ${(j.result.durationMs / 1000).toFixed(1)}s` : `running ${elapsed(j)}`;
 				const other = j.sessionId === here ? "" : " (other session)";
-				const answer = j.result?.finalText ? [`    → ${clip(j.result.finalText.replace(/\s+/g, " "), 200)}`] : [];
-				return [`${j.id} [${state}]${other} ${clip(j.task, 80)}`, ...j.lines.slice(-6).map(l => `    ${l}`), ...answer];
+				return `${j.id} [${state}]${other} ${clip(j.task, 80)}`;
 			});
-			await ctx.ui.select("Unreal jobs (Esc to close)", rows);
+			const picked = await ctx.ui.select("Unreal jobs: pick one to show it here (Esc to close)", rows);
+			const job = picked ? jobs.get(picked.split(" ")[0]!) : undefined;
+			if (!job) return;
+			if (!job.result) {
+				ctx.ui.notify([`unreal ${job.id} is still running:`, ...job.lines.slice(-8)].join("\n"), "info");
+				return;
+			}
+			// Show the full result in this chat, as information only (it does not start a turn).
+			pi.sendMessage({
+				customType: "unreal-result",
+				content: `[unreal ${job.id}] ${formatSummary(job.task, job.result)}${job.result.stderr.trim() ? `\n\nstderr (last lines):\n${job.result.stderr.trim().split("\n").slice(-20).join("\n")}` : ""}`,
+				display: true,
+				details: { jobId: job.id, task: job.task, ...job.result, stderr: job.result.stderr.slice(-4000) },
+				attribution: "agent",
+			} as never);
 		},
 	});
 

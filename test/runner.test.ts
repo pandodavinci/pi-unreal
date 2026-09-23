@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { BridgeEvent } from "../src/events";
-import { runUnreal } from "../src/runner";
+import { explainRunnerError, runUnreal } from "../src/runner";
 
 const FAKE = ["bun", path.join(import.meta.dir, "fake-runner.ts")];
 const tmp = () => path.join(os.tmpdir(), `omp-unreal-test-${Math.random().toString(36).slice(2)}`);
@@ -241,27 +241,54 @@ group("runUnreal: startup and defaults", () => {
 
 group("runUnreal: host responsiveness", () => {
 	// Pi and Oh My Pi run extensions on their UI thread, so a run must not block the event loop.
-	test("process-tree polling does not block the event loop", async () => {
-		const began = performance.now();
-		execFileSync("ps", ["-A", "-o", "pid=,ppid=,pgid="]);
-		const psMs = performance.now() - began;
+	test("process-tree polling does not block the event loop, even when ps is slow", async () => {
+		// A `ps` that takes 300ms: a synchronous poll would freeze the host for that long, every poll.
+		const bin = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-ps-"));
+		const calls = path.join(bin, "calls");
+		fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\necho x >> "${calls}"\nsleep 0.3\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+		const originalPath = process.env.PATH;
+		process.env.PATH = `${bin}:${originalPath}`;
 		const controller = new AbortController();
 		const { promise } = run("slow", { signal: controller.signal });
-		await Bun.sleep(300);
-		// A synchronous `ps` per poll stalls the loop for at least psMs at every poll; random CI noise causes
-		// an occasional stall. Count stalls instead of trusting a single worst case.
-		const stallMs = Math.max(8, psMs * 0.8);
-		let last = performance.now();
-		let stalls = 0;
-		const timer = setInterval(() => {
-			const now = performance.now();
-			if (now - last - 2 >= stallMs) stalls++;
-			last = now;
-		}, 2);
-		await Bun.sleep(1500); // six polls
-		clearInterval(timer);
-		controller.abort();
-		await promise;
-		expect(stalls).toBeLessThan(3);
+		try {
+			await Bun.sleep(200);
+			let last = performance.now();
+			let maxGap = 0;
+			const timer = setInterval(() => {
+				const now = performance.now();
+				maxGap = Math.max(maxGap, now - last);
+				last = now;
+			}, 5);
+			await Bun.sleep(1500);
+			clearInterval(timer);
+			expect(fs.readFileSync(calls, "utf8").trim().split("\n").length).toBeGreaterThanOrEqual(3); // polling happened
+			expect(maxGap).toBeLessThan(150); // never frozen for the 300ms a poll takes
+		} finally {
+			controller.abort();
+			await promise;
+			process.env.PATH = originalPath;
+		}
 	});
+});
+
+group("runUnreal: first-run experience", () => {
+	test("setup errors from the runner come with what to do next", () => {
+		expect(explainRunnerError("create openai-codex client: open Codex auth file (provide existing ChatGPT credentials; login is not implemented): open /x/auth.json: no such file or directory")).toContain("codex login");
+		expect(explainRunnerError("UNREAL_HARNESS_LLM_API_KEY or OPENAI_API_KEY must be set")).toContain("shell you start Pi from");
+		expect(explainRunnerError("model must be set")).toBe("model must be set");
+	});
+
+	test.skipIf(process.env.PI_UNREAL_SKIP_LIVE === "1")("the first-run download is announced, and a failed download says what to do", async () => {
+		const statuses: string[] = [];
+		const result = await runUnreal({
+			task: "t",
+			cwd: os.tmpdir(),
+			stateDir: tmp(),
+			env: { PATH: "/nonexistent", PI_UNREAL_STATE_DIR: tmp(), PI_UNREAL_RUNNER_VERSION: "0.0.0-does-not-exist" },
+			onStatus: message => statuses.push(message),
+		});
+		expect(statuses.join()).toContain("Downloading the Unreal Agent runner");
+		expect(result.status).toBe("crashed");
+		expect(result.errorMessage).toContain("UNREAL_AGENT_RUNNER");
+	}, 30_000);
 });

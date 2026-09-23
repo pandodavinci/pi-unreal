@@ -209,27 +209,68 @@ describe("background delegation", () => {
 	});
 });
 
-describe("Oh My Pi modes without input hooks", () => {
-	const argv = process.argv;
-	afterEach(() => {
-		process.argv = argv;
+describe("host modes", () => {
+	test("--unreal turns itself off where the host skips input hooks, and says so", async () => {
+		const omp = await setup("echo", { ohMyPi: true, mode: "rpc", flags: { unreal: true } });
+		expect(omp.notifications.join()).toContain("needs the interactive terminal");
+		expect(await omp.emit("input", { text: "hi", source: "rpc" })).toBeUndefined();
+		await omp.command("harness", "unreal");
+		expect(await omp.emit("input", { text: "hi", source: "rpc" })).toBeUndefined();
 	});
 
-	test("--unreal in Oh My Pi RPC mode turns itself off and says why", async () => {
-		process.argv = ["bun", "omp", "--mode", "rpc", "--unreal"];
-		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
-		expect(host.notifications.join()).toContain("does not pass messages to extensions");
-		expect(await host.emit("input", { text: "hi", source: "rpc" })).toBeUndefined();
-		await host.command("harness", "unreal");
-		expect(await host.emit("input", { text: "hi", source: "rpc" })).toBeUndefined();
+	test("in print mode, where there is no UI, the warning goes to stderr", async () => {
+		const written: string[] = [];
+		const original = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string) => written.push(String(chunk)) > 0) as never;
+		try {
+			await setup("echo", { mode: "print", flags: { unreal: true } });
+		} finally {
+			process.stderr.write = original;
+		}
+		expect(written.join()).toContain("needs the interactive terminal");
 	});
 
-	test("Pi RPC mode and Oh My Pi's interactive mode keep --unreal", async () => {
-		process.argv = ["node", "pi", "--mode", "rpc", "--unreal"];
-		const pi = await setup("echo", { flags: { unreal: true } });
+	test("Pi keeps --unreal in RPC mode; Oh My Pi keeps it in its TUI", async () => {
+		const pi = await setup("echo", { mode: "rpc", flags: { unreal: true } });
 		expect(await pi.emit("input", { text: "hi", source: "rpc" })).toEqual({ action: "handled", handled: true });
-		process.argv = ["bun", "omp", "--unreal"];
 		const omp = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
 		expect(await omp.emit("input", { text: "hi", source: "interactive" })).toEqual({ action: "handled", handled: true });
+	});
+
+	test("Oh My Pi's command-line prompt (which skips the input hook) is stopped and handed to Unreal", async () => {
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		host.state.idle = false; // Oh My Pi is mid-setup of its own turn here
+		await host.emit("before_agent_start", { prompt: "fix the tests" });
+		expect(host.state.aborts).toBe(1);
+		await waitFor(() => answers(host).length === 1);
+		expect((answers(host)[0]!.message.details as { body: string }).body).toBe("ECHO:fix the tests");
+		expect(host.sent.some(s => s.message.customType === "unreal-you")).toBe(true);
+	});
+
+	test("Pi's before_agent_start is left alone (its input hook already caught the prompt)", async () => {
+		const host = await setup("echo", { flags: { unreal: true } });
+		await host.emit("before_agent_start", { prompt: "anything" });
+		expect(host.state.aborts).toBe(0);
+	});
+	// /unreal in print mode (waits for the job and prints the result) is covered end to end in test/e2e-host.mjs.
+});
+
+describe("cancellation and branches", () => {
+	test("messages dropped with Esc are never replayed to Unreal later", async () => {
+		const host = await setup("slow", { flags: { unreal: true } });
+		await host.emit("input", { text: "long task", source: "interactive" });
+		await host.emit("input", { text: "queued follow-up", source: "interactive" });
+		await Bun.sleep(300);
+		// The transcript the host now holds: both user bubbles.
+		host.state.branch = host.sent.map((s, i) => ({ id: `m${i}`, type: "custom_message", ...s.message }));
+		expect(host.pressKey("\x1b")).toBe(true);
+		await waitFor(() => answers(host).length === 1);
+		host.state.branch = [...host.state.branch, ...host.sent.slice(-1).map(s => ({ id: "a0", type: "custom_message", ...s.message }))];
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("echo");
+		await host.emit("input", { text: "something else", source: "interactive" });
+		await waitFor(() => answers(host).length === 2);
+		const body = (answers(host)[1]!.message.details as { body: string }).body;
+		expect(body).not.toContain("queued follow-up");
+		expect(body).not.toContain("long task");
 	});
 });

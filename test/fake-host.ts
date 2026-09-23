@@ -15,24 +15,33 @@ export interface Sent {
 
 export interface FakeContext {
 	cwd: string;
+	mode: "tui" | "rpc" | "json" | "print";
 	hasUI: boolean;
+	abort(): void;
 	isIdle(): boolean;
 	sessionManager: { getSessionId(): string; getBranch(): unknown[] };
 	ui: Record<string, (...args: never[]) => unknown>;
 }
 
-export function createFakeHost(opts: { ohMyPi?: boolean; flags?: Record<string, boolean>; cwd?: string } = {}) {
+export function createFakeHost(
+	opts: { ohMyPi?: boolean; flags?: Record<string, boolean>; cwd?: string; mode?: FakeContext["mode"] } = {},
+) {
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, { handler: (args: string, ctx: FakeContext) => Promise<void> }>();
 	const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
 	const sent: Sent[] = [];
 	const notifications: string[] = [];
 	const terminalListeners = new Set<(data: string) => unknown>();
-	const state = { idle: true, sessionId: "s1", branch: [] as unknown[] };
+	const state = { idle: true, sessionId: "s1", branch: [] as unknown[], aborts: 0 };
 
 	const ctx: FakeContext = {
 		cwd: opts.cwd ?? fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-host-")),
-		hasUI: true,
+		mode: opts.mode ?? "tui",
+		hasUI: opts.mode !== "print" && opts.mode !== "json",
+		abort: () => {
+			state.aborts++;
+			state.idle = true;
+		},
 		isIdle: () => state.idle,
 		sessionManager: { getSessionId: () => state.sessionId, getBranch: () => state.branch },
 		ui: {
@@ -58,6 +67,8 @@ export function createFakeHost(opts: { ohMyPi?: boolean; flags?: Record<string, 
 		getFlag: (name: string) => opts.flags?.[name],
 		registerMessageRenderer: () => {},
 		sendMessage: (message: Sent["message"], options?: Sent["options"]) => sent.push({ message, options }),
+		// Like the hosts: a custom entry on the current branch, never sent to a model.
+		appendEntry: (customType: string, data: unknown) => state.branch.push({ id: `entry-${state.branch.length}`, type: "custom", customType, data }),
 	};
 	if (opts.ohMyPi) pi.zod = {};
 

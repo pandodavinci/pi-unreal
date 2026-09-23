@@ -15,6 +15,7 @@ import * as path from "node:path";
 export const RUNNER_VERSION = "0.1.1";
 const RELEASES = "https://github.com/unreallabsai/unreal-agent/releases/download";
 const BINARY = "unreal-agent-runner";
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 export function stateRoot(env: Record<string, string | undefined> = process.env): string {
 	return env.PI_UNREAL_STATE_DIR ?? path.join(os.homedir(), ".cache", "pi-unreal");
@@ -94,7 +95,12 @@ async function download(version: string, target: string, log: (msg: string) => v
 	const dir = path.dirname(target);
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-"));
 	try {
-		const [sumsRes, archiveRes] = await Promise.all([fetchImpl(`${base}/SHA256SUMS`), fetchImpl(`${base}/${archive}`)]);
+		// Bounded, so a stalled connection fails (and the next attempt retries) instead of hanging forever.
+		const signal = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+		const [sumsRes, archiveRes] = await Promise.all([
+			fetchImpl(`${base}/SHA256SUMS`, { signal }),
+			fetchImpl(`${base}/${archive}`, { signal }),
+		]);
 		if (!sumsRes.ok) throw new Error(`fetch SHA256SUMS: HTTP ${sumsRes.status}`);
 		if (!archiveRes.ok) throw new Error(`fetch ${archive}: HTTP ${archiveRes.status}`);
 		const expected = parseSums(await sumsRes.text()).get(archive);

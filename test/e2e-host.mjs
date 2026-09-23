@@ -4,7 +4,7 @@
 //   node test/e2e-host.mjs            # Pi from devDependencies
 //   node test/e2e-host.mjs omp        # Oh My Pi, if `omp` is on PATH (needs Bun >= 1.3.14)
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,17 +25,32 @@ const command =
 		? ["omp", "--mode", "rpc", "--no-session", "-e", root, "--unreal"]
 		: [path.join(root, "node_modules", ".bin", "pi"), "--mode", "rpc", "--no-session", "-e", root, "--unreal"];
 
+// A named profile would make the host ignore PI_CODING_AGENT_DIR and load the developer's real config.
+const inherited = { ...process.env };
+delete inherited.OMP_PROFILE;
+delete inherited.PI_PROFILE;
+const hostEnv = {
+	...inherited,
+	PI_CODING_AGENT_DIR: path.join(tmp, "pi-agent"), // throwaway config, same as a fresh CI machine
+	PI_UNREAL_STATE_DIR: path.join(tmp, "state"),
+	UNREAL_AGENT_RUNNER: runner,
+	// Oh My Pi refuses to start without any model configured. The test never calls one.
+	...(host === "omp" && !process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: "sk-e2e-never-used" } : {}),
+};
+
+// Print mode first: the host exits right after the prompt, so /unreal must wait and print the result itself.
+const printMode = spawnSync(command[0], [...command.slice(1).filter(arg => !["--mode", "rpc", "--unreal"].includes(arg)), "-p", "/unreal print task"], {
+	cwd: workspace,
+	env: hostEnv,
+	encoding: "utf8",
+	timeout: 60_000,
+});
+assert.match(printMode.stdout ?? "", /ECHO:print task/, `print mode did not print the result\nstdout:\n${printMode.stdout}\nstderr:\n${printMode.stderr}`);
+
 const child = spawn(command[0], command.slice(1), {
 	cwd: workspace,
 	stdio: ["pipe", "pipe", "pipe"],
-	env: {
-		...process.env,
-		PI_CODING_AGENT_DIR: path.join(tmp, "pi-agent"), // throwaway Pi config, same as a fresh CI machine
-		PI_UNREAL_STATE_DIR: path.join(tmp, "state"),
-		UNREAL_AGENT_RUNNER: runner,
-		// Oh My Pi refuses to start without any model configured. The test never calls one.
-		...(host === "omp" && !process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: "sk-e2e-never-used" } : {}),
-	},
+	env: hostEnv,
 });
 
 let stderr = "";
@@ -90,7 +105,7 @@ try {
 	if (host === "omp") {
 		// Oh My Pi skips extension input hooks outside its terminal UI: the plugin must say so, not pretend.
 		await waitFor(
-			r => r.type === "extension_ui_request" && r.method === "notify" && /does not pass messages/.test(r.message ?? ""),
+			r => r.type === "extension_ui_request" && r.method === "notify" && /needs the interactive terminal/.test(r.message ?? ""),
 			"the RPC-mode warning",
 		);
 	} else {
@@ -122,8 +137,8 @@ try {
 	assert.equal(records.filter(r => r.type === "agent_start").length, 0, "host agent loop started");
 	console.log(
 		host === "omp"
-			? "e2e omp: RPC-mode warning shown, Unreal handled the background job, host agent loop idle"
-			: "e2e pi: Unreal handled the chat and the background job, host agent loop idle",
+			? "e2e omp: print-mode /unreal printed its result; RPC warning shown; background job handled; host agent loop idle"
+			: "e2e pi: print-mode /unreal printed its result; chat and background job handled by Unreal; host agent loop idle",
 	);
 } finally {
 	child.kill("SIGTERM");

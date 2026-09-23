@@ -29,6 +29,8 @@ export interface UnrealRunOptions {
 	/** Immediate hard kill of the whole tree (used for shutdown deadlines). */
 	forceSignal?: AbortSignal;
 	onEvent?: (event: BridgeEvent, raw: string) => void;
+	/** Human-readable progress outside the runner's own events (e.g. the first-run download). */
+	onStatus?: (message: string) => void;
 	/** Override argv[0..n] used to launch the runner (tests use a fake runner). */
 	command?: string[];
 	env?: Record<string, string | undefined>;
@@ -192,7 +194,11 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 
 	let argv: string[];
 	try {
-		const runner = opts.command ?? [await untilAborted(resolveRunner(baseEnv, debug), opts.signal, opts.forceSignal)];
+		const log = (message: string) => {
+			debug(message);
+			if (message.startsWith("downloading")) opts.onStatus?.("Downloading the Unreal Agent runner (first run only)…");
+		};
+		const runner = opts.command ?? [await untilAborted(resolveRunner(baseEnv, log), opts.signal, opts.forceSignal)];
 		if (aborted()) return cancelledBeforeStart();
 		argv = [
 			...runner,
@@ -211,7 +217,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			status: "crashed",
 			exitCode: null,
 			durationMs: performance.now() - started,
-			errorMessage: `unreal-agent-runner unavailable: ${err instanceof Error ? err.message : String(err)}`,
+			errorMessage: `Could not get the Unreal Agent runner: ${err instanceof Error ? err.message : String(err)}\nCheck your connection to github.com, or install unreal-agent-runner yourself and set UNREAL_AGENT_RUNNER.`,
 		};
 	}
 	// Default to the Codex login (~/.codex/auth.json). The runner's openai-codex provider has no default model.
@@ -261,17 +267,16 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		}
 	};
 	// Periodic and event-driven snapshots run in the background, one at a time.
-	let polling = false;
+	let pendingPoll: Promise<void> | undefined;
 	const poll = () => {
-		if (polling) return;
-		polling = true;
-		descendantsOfAsync(pid)
+		if (pendingPoll) return;
+		pendingPoll = descendantsOfAsync(pid)
 			.then(found => {
 				for (const p of found) known.set(p.pid, p);
 			})
 			.catch(err => debug(`descendant snapshot failed: ${String(err)}`))
 			.finally(() => {
-				polling = false;
+				pendingPoll = undefined;
 			});
 	};
 	const treePoll = setInterval(poll, TREE_POLL_MS);
@@ -415,14 +420,19 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		}
 	} else if (runnerError !== undefined) {
 		status = "failed";
-		errorMessage = runnerError;
+		errorMessage = explainRunnerError(runnerError);
 	} else {
 		status = "crashed";
 		const tail = stderrTail.trim().split("\n").slice(-5).join("\n");
 		errorMessage = `runner exited with code ${exitCode}${signalCode ? ` (${signalCode})` : ""}${tail ? `: ${tail}` : ""}`;
 	}
 	// Unreal's own cleanup of Bash groups is asynchronous and can race its exit; make sure nothing survives.
-	if (status !== "completed" && status !== "incomplete") killDescendants();
+	if (status !== "completed" && status !== "incomplete") {
+		// A snapshot taken just before the runner died may still be in flight; its processes are orphans now and
+		// invisible to a fresh snapshot, so wait for it (bounded) before the final kill.
+		if (pendingPoll) await Promise.race([pendingPoll, new Promise(resolve => setTimeout(resolve, 2_000))]);
+		killDescendants();
+	}
 	debug(`exit code=${exitCode} signal=${signalCode} status=${status} killedDescendants=${killedDescendants}`);
 
 	return {
@@ -439,6 +449,20 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		logDir,
 		killedDescendants,
 	};
+}
+
+/** Adds what to do next to the runner's setup errors, which are written for developers. */
+export function explainRunnerError(message: string): string {
+	if (/Codex auth file|openai-codex/i.test(message) && /no such file|not found|credentials/i.test(message)) {
+		return `${message}\nUnreal uses your Codex login by default: run \`codex login\`, or set UNREAL_HARNESS_LLM_PROVIDER and an API key in the shell you start Pi from (see the README's Configuration).`;
+	}
+	if (/must be set/.test(message) && /API_KEY/.test(message)) {
+		return `${message}\nExport the key in the shell you start Pi from. A project's .env is ignored by design.`;
+	}
+	if (/unsupported provider/.test(message)) {
+		return `${message}\nCheck UNREAL_HARNESS_LLM_PROVIDER.`;
+	}
+	return message;
 }
 
 export function formatSummary(task: string, result: UnrealRunResult): string {
