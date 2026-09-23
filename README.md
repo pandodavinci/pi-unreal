@@ -85,14 +85,14 @@ Pi stays interactive. `/unreal-jobs` shows progress, `/unreal-cancel` stops the 
 | Type while it works | Messages queue and run in order. Esc stops the current one and drops the queue. |
 | `/harness pi`, `/harness unreal` | Switch who answers, in the same chat. Refused while the other side is still working. |
 
-Slash commands and `!bash` always go to Pi. A prompt on the command line goes to Unreal too; with released Pi 0.87.1, put it before the flag (`pi "fix the tests" --unreal`), since Pi's parser otherwise reads it as the flag's value.
+Slash commands and `!bash` always go to Pi. A prompt on the command line goes to Unreal too: with released Pi 0.87.1, put it before the flag (`pi "fix the tests" --unreal`), since Pi's parser otherwise reads it as the flag's value; Oh My Pi checks its own model login before handing that first prompt over, so without one, type the prompt in the chat instead.
 
 | Mode | `--unreal` | `/unreal`, `unreal_delegate` |
 | --- | --- | --- |
 | Interactive terminal (Pi, Oh My Pi) | yes | yes |
 | Pi RPC | yes | yes |
-| Oh My Pi RPC | off, with a warning ([oh-my-pi#13013](https://github.com/can1357/oh-my-pi/issues/13013)) | yes; results also arrive as notifications ([#13014](https://github.com/can1357/oh-my-pi/issues/13014)) |
-| Print (`-p`) and JSON | off, with a warning on stderr | `/unreal` waits and prints the result; the tool works |
+| Oh My Pi RPC and ACP | off, with a warning ([oh-my-pi#13013](https://github.com/can1357/oh-my-pi/issues/13013)) | yes; results also arrive as notifications and on stderr ([#13014](https://github.com/can1357/oh-my-pi/issues/13014)) |
+| Print (`-p`) and JSON | off, with a warning on stderr | `/unreal` waits and prints the result (exit code 1 if it failed); the tool always runs in the foreground |
 
 | Background commands | |
 | --- | --- |
@@ -123,7 +123,7 @@ In `--unreal` mode the messages you type are handled before they reach Pi's agen
 | `UNREAL_AGENT_RUNNER` | downloaded release | Use your own `unreal-agent-runner` build |
 | `PI_UNREAL_MODE=1` | off | Same as `--unreal` |
 | `PI_UNREAL_THINKING` | runner default (`high`) | `low`, `medium`, `high`, `xhigh`, `max` |
-| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images. Logs, job output and images are removed after 14 days, unused Unreal sessions after 60. |
+| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images. Run logs and job output are removed after 14 days; Unreal sessions, their command output and pasted images after 60 days without use. |
 | `PI_UNREAL_TRUST_DOTENV=1` | off | Let a trusted project's `.env` reach Unreal (model credentials, endpoints and proxies stay pinned) |
 | `PI_UNREAL_DEBUG=1` | off | Write every runner event to `<state>/debug.log` (private file) |
 

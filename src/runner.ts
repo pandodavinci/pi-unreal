@@ -80,6 +80,8 @@ interface Proc {
 }
 
 const PS_ARGS = ["-A", "-o", "pid=,ppid=,pgid="];
+/** Bounds a snapshot, so the final cleanup can always wait for one that is in flight. */
+const PS_TIMEOUT_MS = 2_000;
 
 /** All live descendants of rootPid (pid + process group). Blocks for a `ps` call: use at shutdown only. */
 export function descendantsOf(rootPid: number): Proc[] {
@@ -92,7 +94,7 @@ export function descendantsOf(rootPid: number): Proc[] {
  */
 export function descendantsOfAsync(rootPid: number): Promise<Proc[]> {
 	return new Promise((resolve, reject) => {
-		execFile("ps", PS_ARGS, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (err, out) =>
+		execFile("ps", PS_ARGS, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: PS_TIMEOUT_MS }, (err, out) =>
 			err ? reject(err) : resolve(descendantsIn(out, rootPid)),
 		);
 	});
@@ -430,7 +432,8 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	if (status !== "completed" && status !== "incomplete") {
 		// A snapshot taken just before the runner died may still be in flight; its processes are orphans now and
 		// invisible to a fresh snapshot, so wait for it (bounded) before the final kill.
-		if (pendingPoll) await Promise.race([pendingPoll, new Promise(resolve => setTimeout(resolve, 2_000))]);
+		// It settles within PS_TIMEOUT_MS (ps is killed after that); the extra margin covers process exit.
+		if (pendingPoll) await Promise.race([pendingPoll, new Promise(resolve => setTimeout(resolve, PS_TIMEOUT_MS + 500))]);
 		killDescendants();
 	}
 	debug(`exit code=${exitCode} signal=${signalCode} status=${status} killedDescendants=${killedDescendants}`);

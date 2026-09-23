@@ -26,11 +26,16 @@ async function setup(mode: string, opts: Parameters<typeof createFakeHost>[0] = 
 	return host;
 }
 
-/** Marks that Unreal already has a persisted session for this id (the fake runner does not write one). */
-function unrealSessionExists(id: string) {
+/**
+ * Marks that Unreal already has a persisted session for this id, owned by host chat s1 and last answered at
+ * `headTurn` (the fake runner writes neither).
+ */
+function unrealSessionExists(id: string, headTurn?: string) {
 	const dir = path.join(process.env.PI_UNREAL_STATE_DIR!, "sessions");
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(path.join(dir, `${id}.session.jsonl`), "");
+	// Without headTurn, keep the ownership record the plugin wrote itself.
+	if (headTurn) fs.writeFileSync(path.join(dir, `${id}.owner.json`), JSON.stringify({ hostSession: "s1", headTurn }));
 }
 
 const answers = (host: Awaited<ReturnType<typeof setup>>) => host.sent.filter(s => s.message.customType === "unreal-answer");
@@ -94,11 +99,11 @@ describe("--unreal mode", () => {
 
 	test("a message that never reached Unreal is passed along with the next one", async () => {
 		const host = await setup("echo", { flags: { unreal: true } });
-		unrealSessionExists("pi-s1");
+		unrealSessionExists("pi-s1", "t0");
 		host.state.branch = [
-			{ type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "earlier", delivered: true } },
-			{ type: "custom_message", customType: "unreal-you", content: "x", details: { text: "use port 8080", turnId: "lost" } },
-			{ type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "", delivered: false } },
+			{ id: "a0", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "earlier", delivered: true, turnId: "t0", unrealSession: "pi-s1" } },
+			{ id: "y1", type: "custom_message", customType: "unreal-you", content: "x", details: { text: "use port 8080", turnId: "lost" } },
+			{ id: "a1", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "", delivered: false, turnId: "lost" } },
 		];
 		await host.emit("input", { text: "start the server", source: "interactive" });
 		await waitFor(() => answers(host).length === 1);
@@ -109,7 +114,7 @@ describe("--unreal mode", () => {
 
 	test("a turn whose runner failed before saving the prompt is not treated as delivered", async () => {
 		const host = await setup("error", { flags: { unreal: true } });
-		unrealSessionExists("pi-s1");
+		unrealSessionExists("pi-s1", "t-head");
 		await host.emit("input", { text: "use port 8080", source: "interactive" });
 		await waitFor(() => answers(host).length === 1);
 		expect((answers(host)[0]!.message.details as { delivered: boolean }).delivered).toBe(false);
@@ -117,13 +122,13 @@ describe("--unreal mode", () => {
 
 	test("a background result that arrived during a turn reaches Unreal with the next one", async () => {
 		const host = await setup("echo", { flags: { unreal: true } });
-		unrealSessionExists("pi-s1");
+		unrealSessionExists("pi-s1", "t1");
 		host.state.branch = [
-			{ id: "a1", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "prev", delivered: true, turnId: "t0", contextIds: [] } },
+			{ id: "a1", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "prev", delivered: true, turnId: "t0", unrealSession: "pi-s1", contextIds: [] } },
 			{ id: "y1", type: "custom_message", customType: "unreal-you", content: "x", details: { text: "current", turnId: "t1" } },
 			// Arrived while turn t1 was running, after its context was captured:
 			{ id: "r1", type: "custom_message", customType: "unreal-result", content: "[unreal u2] build failed" },
-			{ id: "a2", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "ok", delivered: true, turnId: "t1", contextIds: [] } },
+			{ id: "a2", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "ok", delivered: true, turnId: "t1", unrealSession: "pi-s1", contextIds: [] } },
 		];
 		await host.emit("input", { text: "fix it", source: "interactive" });
 		await waitFor(() => answers(host).length === 1);
@@ -272,5 +277,67 @@ describe("cancellation and branches", () => {
 		const body = (answers(host)[1]!.message.details as { body: string }).body;
 		expect(body).not.toContain("queued follow-up");
 		expect(body).not.toContain("long task");
+	});
+});
+
+describe("branches and handoffs", () => {
+	test("an answer that finishes after /tree moved elsewhere is not added to the new branch", async () => {
+		const host = await setup("slow", { flags: { unreal: true } });
+		host.state.branch = [{ id: "root", type: "message", message: { role: "user", content: "start" } }];
+		await host.emit("input", { text: "long task", source: "interactive" });
+		await Bun.sleep(300);
+		host.state.branch = [{ id: "other", type: "message", message: { role: "user", content: "another branch" } }]; // /tree
+		expect(host.pressKey("\x1b")).toBe(true);
+		await waitFor(() => host.notifications.some(n => n.includes("another chat or branch")));
+		expect(answers(host)).toEqual([]);
+	});
+
+	test("a queued message typed on a branch the user left is dropped, not run against the new one", async () => {
+		const host = await setup("delay", { flags: { unreal: true } });
+		host.state.branch = [{ id: "root", type: "message", message: { role: "user", content: "start" } }];
+		await host.emit("input", { text: "first", source: "interactive" });
+		await host.emit("input", { text: "queued on the old branch", source: "interactive" });
+		host.state.branch = [{ id: "other", type: "message", message: { role: "user", content: "another branch" } }]; // /tree
+		await waitFor(() => host.notifications.some(n => n.includes("queued message for another branch was dropped")));
+		expect(answers(host)).toEqual([]); // neither answer landed on the new branch
+		const queued = host.sent.filter(s => s.message.customType === "unreal-you").map(s => (s.message.details as { turnId: string }).turnId)[1]!;
+		const cancelled = JSON.parse(fs.readFileSync(path.join(process.env.PI_UNREAL_STATE_DIR!, "cancelled", "s1.json"), "utf8"));
+		expect(cancelled).toContain(queued); // never replayed if the user returns to that branch
+	});
+
+	test("Oh My Pi: only the startup prompt is taken over, never later turns (skills, other extensions)", async () => {
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		await host.emit("input", { text: "/skill:review", source: "interactive" }); // typed: slash commands pass through
+		await host.emit("before_agent_start", { prompt: "expanded skill instructions" });
+		expect(host.state.aborts).toBe(0);
+		const fresh = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		await fresh.emit("before_agent_start", { prompt: "startup prompt" });
+		await fresh.emit("before_agent_start", { prompt: "a later turn" });
+		expect(fresh.state.aborts).toBe(1);
+	});
+
+	test("Oh My Pi: a startup handoff is not delivered into a chat the user switched to meanwhile", async () => {
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		host.state.idle = false;
+		const abort = host.ctx.abort;
+		host.ctx.abort = () => {
+			host.state.aborts++; // Oh My Pi stays busy for a moment after the abort
+		};
+		await host.emit("before_agent_start", { prompt: "startup prompt" });
+		host.state.sessionId = "s2";
+		await host.emit("session_switch", {});
+		host.state.idle = true;
+		host.ctx.abort = abort;
+		await Bun.sleep(300);
+		expect(host.sent.filter(s => s.message.customType === "unreal-you")).toEqual([]);
+		expect(host.notifications.join()).toContain("could not hand the command-line prompt");
+	});
+
+	test("background delegation in print mode runs in the foreground, since the host exits after its answer", async () => {
+		const host = await setup("echo", { mode: "print" });
+		const result = (await host.tool("unreal_delegate").execute("id", { task: "t", background: true }, undefined, undefined, host.ctx)) as {
+			content: { text: string }[];
+		};
+		expect(result.content[0]!.text).toContain("ECHO:t");
 	});
 });

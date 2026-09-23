@@ -18,7 +18,7 @@ import { stateRoot as resolveStateRoot } from "./binary";
 import { registerChatMode } from "./chat-mode";
 import { pruneState } from "./state";
 import { type BridgeEvent, describe, emptyStats } from "./events";
-import { hostMode, idleMessagesReachClient, safeTimers, wakeModelDelivery, withDeadline } from "./host";
+import { hostMode, idleMessagesReachClient, safeTimers, tell, wakeModelDelivery, withDeadline } from "./host";
 import { formatSummary, runUnreal, type UnrealRunResult } from "./runner";
 
 type Origin = "command" | "tool";
@@ -116,7 +116,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 		// Outside its TUI, Oh My Pi appends such a message without emitting it to the client (oh-my-pi#13014),
 		// so show the result as a notification there too.
 		if (job.origin === "command" && liveCtx && !idleMessagesReachClient(pi, hostMode(liveCtx))) {
-			liveCtx?.ui.notify(`[unreal ${job.id}] ${formatSummary(job.task, result)}`, result.status === "completed" ? "info" : "error");
+			tell(liveCtx, `[unreal ${job.id}] ${formatSummary(job.task, result)}`, result.status === "completed" ? "info" : "error");
 		}
 	};
 
@@ -258,6 +258,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 				// it goes to stderr.
 				const result = await job.done;
 				fs.writeSync(mode === "print" ? 1 : 2, `${formatSummary(job.task, result)}\n`);
+				if (result.status !== "completed") process.exitCode = 1;
 				return;
 			}
 			ctx.ui.notify(`unreal ${job.id} started. /unreal-jobs to inspect, /unreal-cancel ${job.id} to stop.`, "info");
@@ -325,7 +326,9 @@ export default function piUnreal(pi: ExtensionAPI) {
 			background: Type.Optional(Type.Boolean({ description: "Return immediately and deliver the result later (default false)" })),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			if (params.background) {
+			// In print and JSON modes the host exits after its answer and would cancel a background job.
+			const mode = hostMode(ctx);
+			if (params.background && mode !== "print" && mode !== "json") {
 				const job = startJob(params.task, "tool", ctx);
 				void job.done.then(result => deliver(job, result));
 				return {

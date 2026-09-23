@@ -50,26 +50,37 @@ describe("unseenContext", () => {
 
 describe("unrealSessionFor", () => {
 	const fresh = () => "pi-s1-fresh";
+	const owners = (records: Record<string, { hostSession: string; headTurn: string }>) => (id: string) => records[id];
+	const branch = [answer("a1", "t1", "x", { unrealSession: "pi-s1" })];
 
 	test("a new chat uses the host session id", () => {
-		expect(unrealSessionFor([], "s1", new Map(), fresh)).toBe("pi-s1");
+		expect(unrealSessionFor([], "s1", owners({}), fresh)).toBe("pi-s1");
 	});
 
-	test("the branch that ends where Unreal last answered keeps its session", () => {
-		const branch = [answer("a1", "t1", "x", { unrealSession: "pi-s1" })];
-		expect(unrealSessionFor(branch, "s1", new Map([["pi-s1", "t1"]]), fresh)).toBe("pi-s1");
+	test("the branch that ends where its Unreal session last answered keeps that session, across restarts", () => {
+		// Ownership is persisted next to the session, so a restart sees the same record.
+		expect(unrealSessionFor(branch, "s1", owners({ "pi-s1": { hostSession: "s1", headTurn: "t1" } }), fresh)).toBe("pi-s1");
 	});
 
-	test("after going back to an earlier point (/tree), a fresh session is used", () => {
-		const branch = [answer("a1", "t1", "x", { unrealSession: "pi-s1" })];
-		// Unreal's session has since answered t2 on another branch.
-		expect(unrealSessionFor(branch, "s1", new Map([["pi-s1", "t2"]]), fresh)).toBe("pi-s1-fresh");
-		// Going back before the first answer while that session exists elsewhere.
-		expect(unrealSessionFor([], "s1", new Map([["pi-s1", "t2"]]), fresh)).toBe("pi-s1-fresh");
+	test("after going back (/tree) past a later answer, a fresh session is used", () => {
+		expect(unrealSessionFor(branch, "s1", owners({ "pi-s1": { hostSession: "s1", headTurn: "t2" } }), fresh)).toBe("pi-s1-fresh");
+		expect(unrealSessionFor([], "s1", owners({ "pi-s1": { hostSession: "s1", headTurn: "t2" } }), fresh)).toBe("pi-s1-fresh");
 	});
 
-	test("after a restart (no known heads) the branch is trusted", () => {
-		const branch = [answer("a1", "t1", "x", { unrealSession: "pi-s1" })];
-		expect(unrealSessionFor(branch, "s1", new Map(), fresh)).toBe("pi-s1");
+	test("a fork never shares its parent's Unreal session, even when forked at the latest answer", () => {
+		expect(unrealSessionFor(branch, "fork", owners({ "pi-s1": { hostSession: "s1", headTurn: "t1" } }), () => "pi-fork-fresh")).toBe(
+			"pi-fork-fresh",
+		);
+	});
+
+	test("an answer whose session has no ownership record (older version) is re-seeded in a fresh session", () => {
+		expect(unrealSessionFor(branch, "s1", owners({}), fresh)).toBe("pi-s1-fresh");
+	});
+});
+
+describe("unseenContext: persistent cancellations", () => {
+	test("turns canceled in another branch or before a restart are skipped", () => {
+		const branch = [you("y1", "t1", "delete everything")];
+		expect(unseenContext(branch, opts({ cancelledTurns: new Set(["t1"]) })).text).toBe("");
 	});
 });

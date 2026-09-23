@@ -1,8 +1,12 @@
 /**
- * Housekeeping for ~/.cache/pi-unreal. Per-run logs, background job output, pasted images and Unreal's
- * per-command output files are disposable after a while; Unreal sessions are its conversation memory and
- * are kept longer (a chat whose session was removed is simply re-seeded from its visible history).
+ * Small persistent records under ~/.cache/pi-unreal, and their housekeeping.
+ *
+ * Per-run logs and background job output are disposable after two weeks. Unreal sessions are its conversation
+ * memory; they, their command output (sessions/operations/<id>) and ownership records, pasted images and
+ * cancellation lists live as long as sessions (60 days since last use). A chat whose session was removed is
+ * simply re-seeded from its visible history.
  */
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -33,17 +37,39 @@ async function removeOlderThan(dir: string, maxAgeMs: number, now: number): Prom
 /** Remove expired files under the state root. Never throws. Returns how many entries were removed. */
 export async function pruneState(root: string, now = Date.now()): Promise<number> {
 	let removed = 0;
-	for (const dir of ["jobs", "chat", "images"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.runs, now);
-	removed += await removeOlderThan(path.join(root, "sessions", "operations"), RETENTION.runs, now);
+	for (const dir of ["jobs", "chat"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.runs, now);
+	for (const dir of ["images", "cancelled"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.sessions, now);
+	// Sessions, then everything that belongs to a session that is gone.
+	const sessions = path.join(root, "sessions");
+	const live = new Set<string>();
 	try {
-		for (const name of await fs.readdir(path.join(root, "sessions"))) {
+		for (const name of await fs.readdir(sessions)) {
 			if (!name.endsWith(".session.jsonl")) continue;
-			const file = path.join(root, "sessions", name);
-			const stat = await fs.lstat(file);
-			if (now - stat.mtimeMs > RETENTION.sessions) {
+			const id = name.slice(0, -".session.jsonl".length);
+			const file = path.join(sessions, name);
+			if (now - (await fs.lstat(file)).mtimeMs > RETENTION.sessions) {
 				await fs.rm(file, { force: true });
 				removed++;
+			} else {
+				live.add(id);
 			}
+		}
+		for (const name of await fs.readdir(sessions)) {
+			if (!name.endsWith(".owner.json")) continue;
+			if (!live.has(name.slice(0, -".owner.json".length))) {
+				await fs.rm(path.join(sessions, name), { force: true });
+				removed++;
+			}
+		}
+	} catch {}
+	try {
+		for (const id of await fs.readdir(path.join(sessions, "operations"))) {
+			if (live.has(id)) continue;
+			const dir = path.join(sessions, "operations", id);
+			// A session that is starting has operations before its file settles: leave anything recent alone.
+			if (now - (await fs.lstat(dir)).mtimeMs < RETENTION.runs) continue;
+			await fs.rm(dir, { recursive: true, force: true });
+			removed++;
 		}
 	} catch {}
 	// Keep the debug log bounded: start over once it is too large.
@@ -55,4 +81,47 @@ export async function pruneState(root: string, now = Date.now()): Promise<number
 		}
 	} catch {}
 	return removed;
+}
+
+/** Which host chat owns an Unreal session, and the turn it last answered (see context.ts unrealSessionFor). */
+export interface SessionOwnership {
+	hostSession: string;
+	headTurn: string;
+}
+
+const safeName = (id: string) => id.replace(/[^A-Za-z0-9._-]/g, "_");
+
+function readJson<T>(file: string): T | undefined {
+	try {
+		return JSON.parse(fsSync.readFileSync(file, "utf8")) as T;
+	} catch {
+		return undefined;
+	}
+}
+
+function writeJson(file: string, value: unknown) {
+	fsSync.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	const staged = `${file}.${process.pid}.tmp`;
+	fsSync.writeFileSync(staged, JSON.stringify(value), { mode: 0o600 });
+	fsSync.renameSync(staged, file);
+}
+
+export function readOwnership(root: string, unrealSession: string): SessionOwnership | undefined {
+	return readJson<SessionOwnership>(path.join(root, "sessions", `${safeName(unrealSession)}.owner.json`));
+}
+
+export function writeOwnership(root: string, unrealSession: string, ownership: SessionOwnership) {
+	writeJson(path.join(root, "sessions", `${safeName(unrealSession)}.owner.json`), ownership);
+}
+
+/** Turns of a host chat that were canceled or dropped; they are never replayed to Unreal. */
+export function readCancelled(root: string, hostSession: string): Set<string> {
+	return new Set(readJson<string[]>(path.join(root, "cancelled", `${safeName(hostSession)}.json`)) ?? []);
+}
+
+export function addCancelled(root: string, hostSession: string, turnIds: readonly string[]) {
+	if (turnIds.length === 0) return;
+	const ids = readCancelled(root, hostSession);
+	for (const id of turnIds) ids.add(id);
+	writeJson(path.join(root, "cancelled", `${safeName(hostSession)}.json`), [...ids]);
 }

@@ -1,7 +1,7 @@
 /**
  * Test double for unreal-agent-runner. Emits real-shaped JSONL items.
  * Mode comes from FAKE_MODE:
- *   ok | echo | slow | crash | error | garbage | truncated | op-failures | bad-shape | big-stderr | partials
+ *   ok | echo | delay (echo after 800ms) | slow | crash | error | garbage | truncated | op-failures | bad-shape | big-stderr | partials
  *   stubborn      ignores SIGINT (forces the bridge's SIGKILL path)
  *   orphan-crash  starts a descendant in its own process group (like Unreal's Bash), then crashes
  *   orphan-slow   starts such a descendant, then runs until interrupted and exits WITHOUT killing it
@@ -29,7 +29,9 @@ const spawnDescendant = async () => {
 	await Bun.sleep(1300); // outlive one bridge tree poll (1s)
 };
 
-if (mode === "echo") {
+if (mode === "delay") await Bun.sleep(800); // then behaves like echo
+
+if (mode === "echo" || mode === "delay") {
 	// Answers with the exact prompt it was given (the JSON request is the last argument).
 	const request = JSON.parse(process.argv.at(-1) ?? "{}") as { prompt?: string; session_id?: string };
 	item("input", { ID: "in1", Kind: "external", Payload: request.prompt });

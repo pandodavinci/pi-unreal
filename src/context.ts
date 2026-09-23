@@ -69,18 +69,21 @@ export function cancelledTurns(branch: readonly Entry[]): Set<string> {
 	return ids;
 }
 
+/** Persisted next to an Unreal session: which host chat owns it and the turn it last answered. */
+export interface SessionOwnership {
+	hostSession: string;
+	headTurn: string;
+}
+
 /**
- * The Unreal session that continues this branch. Unreal's memory is linear, so when the host branch no
- * longer ends where that session last answered (the user went back with /tree or forked), a new session is
- * needed and gets seeded from the visible branch.
- *
- * `heads` maps an Unreal session to the turn id of its latest delivered answer in this process; a session
- * missing from it (e.g. after a restart) is trusted to match the branch.
+ * The Unreal session that continues this branch. Unreal's memory is linear, so a session is reused only when
+ * it belongs to this host chat and its latest answer is the latest answer on this branch. Otherwise (a fork,
+ * or the user went back with /tree and continued elsewhere) a fresh session is used, seeded from the branch.
  */
 export function unrealSessionFor(
 	branch: readonly Entry[],
 	hostSessionId: string,
-	heads: ReadonlyMap<string, string>,
+	ownership: (unrealSession: string) => SessionOwnership | undefined,
 	fresh: () => string,
 ): string {
 	let last: Partial<AnswerDetails> | undefined;
@@ -89,10 +92,10 @@ export function unrealSessionFor(
 		if (details?.delivered) last = details;
 	}
 	const base = `pi-${hostSessionId}`;
-	if (!last) return heads.has(base) ? fresh() : base;
-	const session = last.unrealSession ?? base;
-	const head = heads.get(session);
-	return head === undefined || head === last.turnId ? session : fresh();
+	const candidate = last?.unrealSession ?? base;
+	const owner = ownership(candidate);
+	if (!owner) return last ? fresh() : candidate; // no record: only a brand-new chat may start the base session
+	return owner.hostSession === hostSessionId && owner.headTurn === last?.turnId ? candidate : fresh();
 }
 
 /**
@@ -104,7 +107,14 @@ export function unrealSessionFor(
  */
 export function unseenContext(
 	branch: readonly Entry[],
-	opts: { unrealSession: string; unrealHasSession: boolean; pendingTurns: ReadonlySet<string>; maxChars: number },
+	opts: {
+		unrealSession: string;
+		unrealHasSession: boolean;
+		pendingTurns: ReadonlySet<string>;
+		/** Turns the user canceled or that were dropped (Esc, /new, /tree, exit). */
+		cancelledTurns?: ReadonlySet<string>;
+		maxChars: number;
+	},
 ): { text: string; ids: string[] } {
 	const seen = new Set<string>();
 	const deliveredTurns = new Set<string>();
@@ -117,7 +127,7 @@ export function unseenContext(
 			for (const id of details.contextIds ?? []) seen.add(id);
 		});
 	}
-	const cancelled = cancelledTurns(branch);
+	const cancelled = new Set([...cancelledTurns(branch), ...(opts.cancelledTurns ?? [])]);
 	const lines: string[] = [];
 	const ids: string[] = [];
 	branch.forEach((entry, index) => {

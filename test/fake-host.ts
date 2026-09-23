@@ -19,7 +19,7 @@ export interface FakeContext {
 	hasUI: boolean;
 	abort(): void;
 	isIdle(): boolean;
-	sessionManager: { getSessionId(): string; getBranch(): unknown[] };
+	sessionManager: { getSessionId(): string; getBranch(): unknown[]; getLeafId(): string | null };
 	ui: Record<string, (...args: never[]) => unknown>;
 }
 
@@ -43,7 +43,11 @@ export function createFakeHost(
 			state.idle = true;
 		},
 		isIdle: () => state.idle,
-		sessionManager: { getSessionId: () => state.sessionId, getBranch: () => state.branch },
+		sessionManager: {
+			getSessionId: () => state.sessionId,
+			getBranch: () => state.branch,
+			getLeafId: () => ((state.branch.at(-1) as { id?: string } | undefined)?.id ?? null),
+		},
 		ui: {
 			notify: ((message: string) => notifications.push(message)) as never,
 			setStatus: (() => {}) as never,

@@ -21,20 +21,12 @@ import type { ExtensionAPI, ExtensionContext, InputEvent } from "@earendil-works
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { stateRoot as resolveStateRoot } from "./binary";
-import {
-	ANSWER_TYPE,
-	type AnswerDetails,
-	CANCELLED_TYPE,
-	type Entry,
-	USER_TYPE,
-	type UserDetails,
-	unrealSessionFor,
-	unseenContext,
-} from "./context";
+import { ANSWER_TYPE, type AnswerDetails, type Entry, USER_TYPE, type UserDetails, unrealSessionFor, unseenContext } from "./context";
 import { inspectDotEnv } from "./env";
 import { describe } from "./events";
 import { chatModeSupported, handledInput, hostMode, isOhMyPi, safeTimers, warn, withDeadline } from "./host";
 import { runUnreal } from "./runner";
+import { addCancelled, readCancelled, readOwnership, writeOwnership } from "./state";
 
 const WIDGET_KEY = "unreal-chat";
 const STATUS_KEY = "unreal-harness";
@@ -54,6 +46,8 @@ interface Turn {
 	images: string[];
 	/** Host session the message was typed in; the answer is only posted there. */
 	hostSession: string;
+	/** Host entry the message followed. If the user moves to a branch without it (/tree), the turn is dropped. */
+	parentEntry: string | null;
 }
 
 interface LiveView {
@@ -80,8 +74,10 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	let liveCtx: ExtensionContext | undefined;
 	let unsubscribeKeys: (() => void) | undefined;
 	const queue: Turn[] = [];
-	/** Unreal session id -> turn id of its latest delivered answer (this process). */
-	const heads = new Map<string, string>();
+	let shuttingDown = false;
+	/** Oh My Pi's command-line prompt skips the input hook; only that first prompt is taken over (see below). */
+	let sawTypedInput = false;
+	let startupPromptHandled = false;
 	let active:
 		| {
 				turn: Turn;
@@ -192,15 +188,20 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		}
 	};
 
-	/** Persist that these turns were canceled, so they are never replayed to Unreal as context. */
-	const markCancelled = (turnIds: string[]) => {
-		if (turnIds.length === 0) return;
-		try {
-			pi.appendEntry(CANCELLED_TYPE, { turnIds });
-		} catch (err) {
-			debug("chat", `appendEntry failed: ${String(err)}`);
+	/** Persist that these turns were canceled or dropped, so they are never replayed to Unreal as context. */
+	const markCancelled = (turns: readonly Turn[]) => {
+		for (const hostSession of new Set(turns.map(turn => turn.hostSession))) {
+			try {
+				addCancelled(stateRoot, hostSession, turns.filter(turn => turn.hostSession === hostSession).map(turn => turn.id));
+			} catch (err) {
+				debug("chat", `recording canceled turns failed: ${String(err)}`);
+			}
 		}
 	};
+
+	/** Whether the entry the turn followed is still on the current branch (false after /tree elsewhere). */
+	const onCurrentBranch = (ctx: ExtensionContext, turn: Turn) =>
+		turn.parentEntry === null || branchOf(ctx).some(entry => entry.id === turn.parentEntry);
 
 	const runTurn = async (turn: Turn) => {
 		const ctx = liveCtx!;
@@ -216,12 +217,25 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				);
 			}
 		}
+		if (turn.hostSession !== ctx.sessionManager.getSessionId() || !onCurrentBranch(ctx, turn)) {
+			// Typed on a branch the user has since left: never run it against another conversation.
+			markCancelled([turn]);
+			ctx.ui.notify("A queued message for another branch was dropped.", "info");
+			return;
+		}
 		const branch = branchOf(ctx);
-		const unrealSession = unrealSessionFor(branch, ctx.sessionManager.getSessionId(), heads, () => `pi-${ctx.sessionManager.getSessionId()}-${randomUUID().slice(0, 8)}`);
+		const hostSession = ctx.sessionManager.getSessionId();
+		const unrealSession = unrealSessionFor(
+			branch,
+			hostSession,
+			id => readOwnership(stateRoot, id),
+			() => `pi-${hostSession}-${randomUUID().slice(0, 8)}`,
+		);
 		const context = unseenContext(branch, {
 			unrealSession,
 			unrealHasSession: fs.existsSync(path.join(stateRoot, "sessions", `${unrealSession}.session.jsonl`)),
 			pendingTurns: new Set([turn.id, ...queue.map(queued => queued.id)]),
+			cancelledTurns: readCancelled(stateRoot, hostSession),
 			maxChars: MAX_CONTEXT_CHARS,
 		});
 		const controller = new AbortController();
@@ -278,7 +292,13 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		showProgress();
 		showStatus();
 
-		if (result.promptPersisted) heads.set(unrealSession, turn.id);
+		if (result.promptPersisted) {
+			try {
+				writeOwnership(stateRoot, unrealSession, { hostSession, headTurn: turn.id });
+			} catch (err) {
+				debug("chat", `writing session ownership failed: ${String(err)}`);
+			}
+		}
 		const s = result.stats;
 		const footer = [
 			result.status === "completed" ? null : result.status,
@@ -291,12 +311,12 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			.join(" · ");
 		const error = result.status === "completed" || result.status === "cancelled" ? undefined : result.errorMessage;
 		const body = result.finalText || (result.status === "cancelled" ? "_stopped_" : "");
-		// Different session now (/new while running): keep the transcript clean, just notify.
-		if (turn.hostSession !== liveCtx?.sessionManager.getSessionId()) {
-			liveCtx?.ui.notify(`unreal answer for a previous session dropped (${result.status})`, "info");
+		// Different chat or branch now (/new, /resume, /tree while running): keep that transcript clean.
+		if (!liveCtx || turn.hostSession !== liveCtx.sessionManager.getSessionId() || !onCurrentBranch(liveCtx, turn)) {
+			liveCtx?.ui.notify(`Unreal's answer belongs to another chat or branch and was not added here (${result.status}).`, "info");
 			return;
 		}
-		if (result.status === "cancelled") markCancelled([turn.id]);
+		if (result.status === "cancelled") markCancelled([turn]);
 		// These messages are also in the host model's context (e.g. after /harness pi). Label them so it knows
 		// Unreal already handled them and does not pick up a stopped request as unfinished work.
 		const forModel =
@@ -354,25 +374,30 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			? `Earlier in this chat, not yet in your session (some of it handled by another agent, Pi). Use it as context:\n\n${context}\n\n---\n\n${text}`
 			: text;
 
-	const untilIdle = async (ctx: ExtensionContext, timeoutMs = 10_000) => {
+	const untilIdle = async (ctx: ExtensionContext, timeoutMs = 10_000): Promise<boolean> => {
 		const deadline = Date.now() + timeoutMs;
-		while (!ctx.isIdle() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+		while (!ctx.isIdle()) {
+			if (Date.now() > deadline) return false;
+			await new Promise(resolve => setTimeout(resolve, 50));
+		}
+		return true;
 	};
 
 	/** Show the message in the transcript and queue it for Unreal. */
 	const route = async (ctx: ExtensionContext, text: string, images: ImageContent[] | undefined) => {
+		const parentEntry = ctx.sessionManager.getLeafId();
 		const saved = images?.length ? await saveImages(images) : [];
 		const shown = saved.length ? `${text}  [${saved.length} image${saved.length > 1 ? "s" : ""}]` : text;
 		const turnId = randomUUID();
 		post(USER_TYPE, `[User message sent to Unreal Agent, which handles it]\n${shown}`, { text: shown, turnId } satisfies UserDetails);
-		queue.push({ id: turnId, text, images: saved, hostSession: ctx.sessionManager.getSessionId() });
+		queue.push({ id: turnId, text, images: saved, hostSession: ctx.sessionManager.getSessionId(), parentEntry });
 		void pump();
 	};
 
 	const stopActive = (ctx: ExtensionContext) => {
 		if (!active) return false;
 		active.controller.abort();
-		markCancelled(queue.map(turn => turn.id));
+		markCancelled(queue);
 		queue.length = 0;
 		ctx.ui.notify("Stopping unreal…", "info");
 		return true;
@@ -403,6 +428,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	const onSessionChange = async (_e: unknown, ctx: ExtensionContext) => {
 		unsubscribeKeys?.();
 		unsubscribeKeys = undefined;
+		markCancelled(queue);
 		queue.length = 0;
 		bind(ctx);
 	};
@@ -415,6 +441,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 
 	pi.on("input", async (event, ctx) => {
 		bind(ctx);
+		if (event.source !== "extension") sawTypedInput = true;
 		if (!enabled || event.source === "extension") return undefined;
 		const text = event.text.trim();
 		if ((!text && !event.images?.length) || text.startsWith("/") || text.startsWith("!")) return undefined;
@@ -428,16 +455,24 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	});
 
 	// Oh My Pi sends a prompt given on its command line straight to its agent loop, skipping the input hook.
-	// Its turn can be stopped here, before any model call, and the prompt handed to Unreal instead. (Pi runs the
-	// input hook for every prompt, and aborting here would not stop its turn.)
+	// That first turn is stopped here, before any model call, and the prompt handed to Unreal instead. Only that
+	// startup prompt: later turns that reach this hook (skills, other extensions) are left to the host. Pi runs
+	// the input hook for every prompt, and aborting here would not stop its turn anyway.
 	pi.on("before_agent_start", async (event, ctx) => {
 		bind(ctx);
-		if (!enabled || !isOhMyPi(pi) || hostMode(ctx) !== "tui") return undefined;
+		if (!enabled || !isOhMyPi(pi) || hostMode(ctx) !== "tui" || sawTypedInput || startupPromptHandled) return undefined;
+		startupPromptHandled = true;
 		const text = (event.prompt ?? "").trim();
 		if (!text && !event.images?.length) return undefined;
+		const hostSession = ctx.sessionManager.getSessionId();
 		ctx.abort();
-		// Oh My Pi is still "busy" here; a message posted now would steer the aborted turn. Wait until it settles.
-		void untilIdle(ctx).then(() => {
+		// Oh My Pi is still "busy" here; a message posted now would steer the aborted turn. Wait until it settles,
+		// and give up rather than post into another chat or a busy host.
+		void untilIdle(ctx).then(idle => {
+			if (!idle || shuttingDown || hostSession !== liveCtx?.sessionManager.getSessionId()) {
+				if (!shuttingDown) warn(ctx, "pi-unreal could not hand the command-line prompt to Unreal. Type it again.");
+				return;
+			}
 			// Oh My Pi restores an interrupted prompt into the editor; it has been handed to Unreal, so clear it.
 			if (ctx.hasUI && ctx.ui.getEditorText?.().trim() === text) ctx.ui.setEditorText?.("");
 			return route(ctx, text, event.images as ImageContent[] | undefined);
@@ -481,10 +516,12 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	});
 
 	pi.on("session_shutdown", async () => {
+		shuttingDown = true;
 		timers.clearAll();
 		ticker = false;
 		unsubscribeKeys?.();
 		unsubscribeKeys = undefined;
+		markCancelled(active ? [active.turn, ...queue] : queue);
 		queue.length = 0;
 		if (!active) return;
 		const current = active;

@@ -84,8 +84,17 @@ export function idleMessagesReachClient(pi: ExtensionAPI, mode: HostMode): boole
 	return !isOhMyPi(pi) || mode === "tui";
 }
 
-/** A warning the user sees in every mode: print and JSON modes have no UI, so it goes to stderr there. */
-export function warn(ctx: { hasUI: boolean; ui: { notify(message: string, type?: "info" | "warning" | "error"): void } }, message: string) {
-	if (ctx.hasUI) ctx.ui.notify(message, "warning");
-	else process.stderr.write(`${message}\n`);
+/**
+ * A message the user sees in every mode. Outside the interactive terminal it also goes to stderr: print and
+ * JSON modes have no UI, and in ACP mode Oh My Pi's notify only writes a debug log.
+ */
+export function tell(
+	ctx: { hasUI: boolean; ui: { notify(message: string, type?: "info" | "warning" | "error"): void } },
+	message: string,
+	level: "info" | "warning" | "error" = "warning",
+) {
+	if (ctx.hasUI) ctx.ui.notify(message, level);
+	if (hostMode(ctx) !== "tui") process.stderr.write(`${message}\n`);
 }
+
+export const warn = (ctx: Parameters<typeof tell>[0], message: string) => tell(ctx, message, "warning");
