@@ -17,7 +17,7 @@ import { Type } from "typebox";
 import { stateRoot as resolveStateRoot } from "./binary";
 import { registerChatMode } from "./chat-mode";
 import { type BridgeEvent, describe, emptyStats } from "./events";
-import { safeTimers, wakeModelDelivery, withDeadline } from "./host";
+import { ohMyPiSkipsInputHooks, safeTimers, wakeModelDelivery, withDeadline } from "./host";
 import { formatSummary, runUnreal, type UnrealRunResult } from "./runner";
 
 type Origin = "command" | "tool";
@@ -111,6 +111,11 @@ export default function piUnreal(pi: ExtensionAPI) {
 		// must stay idle; there the result is only shown.
 		if (job.origin === "tool" && !chat.isUnrealMode()) pi.sendMessage(message, wakeModelDelivery(pi));
 		else pi.sendMessage(message);
+		// Oh My Pi's print/JSON/RPC/ACP modes append such a message without emitting it to the client, so show the
+		// result as a notification there too.
+		if (job.origin === "command" && ohMyPiSkipsInputHooks(pi)) {
+			liveCtx?.ui.notify(`[unreal ${job.id}] ${formatSummary(job.task, result)}`, result.status === "completed" ? "info" : "error");
+		}
 	};
 
 	const flushPending = () => {

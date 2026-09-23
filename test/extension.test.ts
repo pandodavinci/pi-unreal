@@ -208,3 +208,28 @@ describe("background delegation", () => {
 		await expect(host.tool("unreal_delegate").execute("id", { task: "t" }, undefined, undefined, host.ctx)).rejects.toThrow("model must be set");
 	});
 });
+
+describe("Oh My Pi modes without input hooks", () => {
+	const argv = process.argv;
+	afterEach(() => {
+		process.argv = argv;
+	});
+
+	test("--unreal in Oh My Pi RPC mode turns itself off and says why", async () => {
+		process.argv = ["bun", "omp", "--mode", "rpc", "--unreal"];
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		expect(host.notifications.join()).toContain("does not pass messages to extensions");
+		expect(await host.emit("input", { text: "hi", source: "rpc" })).toBeUndefined();
+		await host.command("harness", "unreal");
+		expect(await host.emit("input", { text: "hi", source: "rpc" })).toBeUndefined();
+	});
+
+	test("Pi RPC mode and Oh My Pi's interactive mode keep --unreal", async () => {
+		process.argv = ["node", "pi", "--mode", "rpc", "--unreal"];
+		const pi = await setup("echo", { flags: { unreal: true } });
+		expect(await pi.emit("input", { text: "hi", source: "rpc" })).toEqual({ action: "handled", handled: true });
+		process.argv = ["bun", "omp", "--unreal"];
+		const omp = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		expect(await omp.emit("input", { text: "hi", source: "interactive" })).toEqual({ action: "handled", handled: true });
+	});
+});

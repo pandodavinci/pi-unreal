@@ -62,3 +62,20 @@ export function sleep(ms: number): Promise<undefined> {
 }
 
 export const withDeadline = <T>(promise: Promise<T>, ms: number) => Promise.race([promise, sleep(ms)]);
+
+/**
+ * Oh My Pi only runs extension `input` handlers in its interactive terminal UI; in print, JSON, RPC and ACP
+ * modes a prompt goes straight to its agent loop, so --unreal cannot intercept it. Pi runs them in RPC too.
+ */
+export function ohMyPiSkipsInputHooks(pi: ExtensionAPI, argv: readonly string[] = process.argv): boolean {
+	if (!isOhMyPi(pi)) return false;
+	const args = argv.slice(2);
+	if (args[0] === "acp") return true;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i]!;
+		if (arg === "-p" || arg === "--print") return true;
+		const mode = arg === "--mode" ? args[i + 1] : arg.startsWith("--mode=") ? arg.slice("--mode=".length) : undefined;
+		if (mode !== undefined && mode !== "text") return true;
+	}
+	return false;
+}

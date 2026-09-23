@@ -21,7 +21,7 @@ import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { stateRoot as resolveStateRoot } from "./binary";
 import { inspectDotEnv } from "./env";
 import { describe } from "./events";
-import { handledInput, safeTimers, withDeadline } from "./host";
+import { handledInput, ohMyPiSkipsInputHooks, safeTimers, withDeadline } from "./host";
 import { runUnreal, type UnrealRunResult } from "./runner";
 
 const USER_TYPE = "unreal-you";
@@ -405,6 +405,14 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		if (!flagApplied) {
 			flagApplied = true;
 			if (pi.getFlag("unreal") === true) enabled = true;
+			if (enabled && ohMyPiSkipsInputHooks(pi)) {
+				// Say so instead of letting Oh My Pi's own model answer while the status claims Unreal.
+				enabled = false;
+				ctx.ui.notify(
+					"pi-unreal: Oh My Pi does not pass messages to extensions in this mode (print/JSON/RPC/ACP), so --unreal is off and messages go to Oh My Pi's model. /unreal <task> works here; --unreal works in the interactive terminal.",
+					"warning",
+				);
+			}
 		}
 		if (!unsubscribeKeys && ctx.hasUI) {
 			// Re-registered after every session change: Oh My Pi drops terminal listeners on /new and /resume.
@@ -468,6 +476,10 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			else if (choice === "") next = !enabled;
 			else {
 				ctx.ui.notify(`Unknown harness "${args.trim()}". Use /harness unreal or /harness pi.`, "warning");
+				return;
+			}
+			if (next && ohMyPiSkipsInputHooks(pi)) {
+				ctx.ui.notify("Oh My Pi does not pass messages to extensions in this mode. Use /unreal <task>, or the interactive terminal.", "warning");
 				return;
 			}
 			// Never let both agents work on the same chat at once.

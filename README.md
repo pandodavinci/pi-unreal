@@ -130,7 +130,7 @@ In `--unreal` mode the messages you type are handled before they reach Pi's agen
 Set these in your shell, not in a project's `.env`: by default pi-unreal neutralizes every variable a project's `.env` defines.
 
 > [!NOTE]
-> **Streaming.** Released Unreal runners (v0.1.1) accept `include_partial_messages` but ignore it, so each reply appears when it is complete while the step list updates live. pi-unreal already requests streaming and shows replies word by word with any runner that implements it.
+> **Streaming.** Released Unreal runners (v0.1.1) accept `include_partial_messages` but ignore it, so each reply appears when it is complete while the step list updates live. pi-unreal already requests streaming and shows replies word by word with any runner that implements it. An implementation is proposed upstream in [unreal-agent#10](https://github.com/unreallabsai/unreal-agent/issues/10); to try it now, build [that branch](https://github.com/pandodavinci/unreal-agent/tree/partial-messages) and set `UNREAL_AGENT_RUNNER`.
 
 > [!WARNING]
 > Unreal Agent runs shell commands in your project with your permissions, like any coding agent. pi-unreal neutralizes a repo's `.env`, but a malicious repo can still try to steer the agent through its files. Details in [SECURITY.md](SECURITY.md).
@@ -138,8 +138,9 @@ Set these in your shell, not in a project's `.env`: by default pi-unreal neutral
 ### Limitations
 
 - Unreal uses its own tools (Bash, ViewImage, skills in `.harness/skills`). Pi's tools, skills and MCP servers are not available to it.
+- Oh My Pi runs extension input hooks only in its interactive terminal, so `--unreal` is off (with a warning) in `omp -p`, `--mode json`, `rpc` and `acp` ([oh-my-pi#13013](https://github.com/can1357/oh-my-pi/issues/13013)). `/unreal <task>` works everywhere; in those modes its result arrives as a notification ([oh-my-pi#13014](https://github.com/can1357/oh-my-pi/issues/13014)). Pi supports `--unreal` in RPC mode.
 - Commands are tracked by polling Unreal's process tree 4 times a second. A command started and orphaned by Unreal in the instant before it exits (on a crash, or while stopping) can survive cleanup.
-- Tested on Pi 0.87.1 and Oh My Pi 18.2.8 and 18.2.10 on macOS arm64. CI runs the tests on macOS and Linux and loads the plugin on Node.
+- Tested by hand on Pi 0.87.1 and Oh My Pi 18.2.8 to 18.2.11 (macOS arm64). CI runs the test suite on macOS and Linux, loads the plugin on Node, and drives the real `pi` and `omp` binaries end to end.
 
 ## Contributing
 
@@ -150,6 +151,7 @@ bun install
 bun run check     # typecheck
 bun test          # includes live attack tests against the real Unreal runner; PI_UNREAL_SKIP_LIVE=1 skips them
 bun run smoke:node  # loads the plugin on Node the way Pi does
+bun run e2e         # drives the real `pi` binary in RPC mode (e2e:omp needs `omp` on PATH)
 ```
 
 Try local changes with `pi -e ./src/index.ts --unreal`. Code in `src/` must stay Node-compatible, since Pi runs extensions on Node.

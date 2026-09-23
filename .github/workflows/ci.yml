@@ -18,3 +18,32 @@ jobs:
       - run: bun run check
       - run: bun test
       - run: bun run smoke:node
+
+  # Real hosts in RPC mode with a fake Unreal runner: no model, no network.
+  e2e-pi:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install
+      - run: bun run e2e
+
+  e2e-oh-my-pi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install
+      - run: bun add -g @oh-my-pi/pi-coding-agent
+      - run: echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+      - run: omp --version
+      - run: bun run e2e:omp

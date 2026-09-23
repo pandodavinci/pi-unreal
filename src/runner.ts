@@ -7,7 +7,7 @@
  * command in yet another process group, so on cancel/crash we also kill every descendant group
  * we have observed (snapshotted periodically, since orphans lose their parent link once the runner dies).
  */
-import { type ChildProcessByStdio, execFileSync, spawn } from "node:child_process";
+import { type ChildProcessByStdio, execFile, execFileSync, spawn } from "node:child_process";
 import * as path from "node:path";
 import type { Readable } from "node:stream";
 import { resolveRunner } from "./binary";
@@ -77,9 +77,28 @@ interface Proc {
 	pgid: number;
 }
 
-/** All live descendants of rootPid (pid + process group). */
+const PS_ARGS = ["-A", "-o", "pid=,ppid=,pgid="];
+
+/** All live descendants of rootPid (pid + process group). Blocks for a `ps` call: use at shutdown only. */
 export function descendantsOf(rootPid: number): Proc[] {
-	const out = execFileSync("ps", ["-A", "-o", "pid=,ppid=,pgid="], { encoding: "utf8" });
+	return descendantsIn(execFileSync("ps", PS_ARGS, { encoding: "utf8" }), rootPid);
+}
+
+/**
+ * Same as descendantsOf without blocking the host's event loop (Pi and Oh My Pi run extensions on their UI
+ * thread, and one `ps` takes ~15ms).
+ */
+export function descendantsOfAsync(rootPid: number): Promise<Proc[]> {
+	return new Promise((resolve, reject) => {
+		execFile("ps", PS_ARGS, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (err, out) =>
+			err ? reject(err) : resolve(descendantsIn(out, rootPid)),
+		);
+	});
+}
+
+/** Descendants of rootPid in `ps -o pid=,ppid=,pgid=` output. */
+export function descendantsIn(psOutput: string, rootPid: number): Proc[] {
+	const out = psOutput;
 	const children = new Map<number, Proc[]>();
 	for (const line of out.split("\n")) {
 		const [pid, ppid, pgid] = line.trim().split(/\s+/).map(Number);
@@ -233,6 +252,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 
 	// Track descendants while the runner lives; they get reparented (and invisible) once it dies.
 	const known = new Map<number, Proc>();
+	// Synchronous snapshot, only for termination paths (once per run).
 	const snapshot = () => {
 		try {
 			for (const p of descendantsOf(pid)) known.set(p.pid, p);
@@ -240,7 +260,21 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			debug(`descendant snapshot failed: ${String(err)}`);
 		}
 	};
-	const treePoll = setInterval(snapshot, TREE_POLL_MS);
+	// Periodic and event-driven snapshots run in the background, one at a time.
+	let polling = false;
+	const poll = () => {
+		if (polling) return;
+		polling = true;
+		descendantsOfAsync(pid)
+			.then(found => {
+				for (const p of found) known.set(p.pid, p);
+			})
+			.catch(err => debug(`descendant snapshot failed: ${String(err)}`))
+			.finally(() => {
+				polling = false;
+			});
+	};
+	const treePoll = setInterval(poll, TREE_POLL_MS);
 
 	const signalGroup = (sig: NodeJS.Signals) => {
 		try {
@@ -312,7 +346,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			if (!line.startsWith('{"type":"partial"')) debug(`stdout ${line}`);
 			for (const event of mapper.map(line)) {
 				if (event.kind === "runner_error") runnerError = event.message;
-				if (event.kind === "tool_call") snapshot();
+				if (event.kind === "tool_call") poll();
 				try {
 					opts.onEvent?.(event, line);
 				} catch (err) {

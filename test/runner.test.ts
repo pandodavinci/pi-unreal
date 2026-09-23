@@ -1,4 +1,5 @@
 import { afterEach, describe as group, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -235,5 +236,30 @@ group("runUnreal: startup and defaults", () => {
 		controller.abort();
 		const result = await promise;
 		expect(result.status).toBe("cancelled");
+	});
+});
+
+group("runUnreal: host responsiveness", () => {
+	// Pi and Oh My Pi run extensions on their UI thread, so a run must not block the event loop.
+	test("process-tree polling does not block the event loop", async () => {
+		const began = performance.now();
+		execFileSync("ps", ["-A", "-o", "pid=,ppid=,pgid="]);
+		const psMs = performance.now() - began;
+		const controller = new AbortController();
+		const { promise } = run("slow", { signal: controller.signal });
+		await Bun.sleep(300);
+		let last = performance.now();
+		let maxLag = 0;
+		const timer = setInterval(() => {
+			const now = performance.now();
+			maxLag = Math.max(maxLag, now - last - 2);
+			last = now;
+		}, 2);
+		await Bun.sleep(1500); // six polls
+		clearInterval(timer);
+		controller.abort();
+		await promise;
+		// A synchronous `ps` per poll shows up as lag of at least psMs (about 2x in practice).
+		expect(maxLag).toBeLessThan(Math.max(15, psMs));
 	});
 });
