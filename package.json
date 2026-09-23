@@ -4,17 +4,33 @@
 	"description": "Use Unreal Agent as the harness inside Pi and Oh My Pi, or delegate long tasks to it in the background.",
 	"type": "module",
 	"license": "MIT",
-	"keywords": ["pi-package", "pi-extension", "oh-my-pi", "unreal-agent", "coding-agent", "harness"],
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"oh-my-pi",
+		"unreal-agent",
+		"coding-agent",
+		"harness"
+	],
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/pandodavinci/pi-unreal.git"
 	},
-	"files": ["src", "README.md", "LICENSE", "SECURITY.md"],
+	"files": [
+		"src",
+		"README.md",
+		"LICENSE",
+		"SECURITY.md"
+	],
 	"pi": {
-		"extensions": ["./src/index.ts"]
+		"extensions": [
+			"./src/index.ts"
+		]
 	},
 	"omp": {
-		"extensions": ["./src/index.ts"]
+		"extensions": [
+			"./src/index.ts"
+		]
 	},
 	"scripts": {
 		"test": "bun test",
@@ -28,5 +44,16 @@
 	"devDependencies": {
 		"@types/bun": "^1.4.2",
 		"typescript": "^7.0.2"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-coding-agent": {
+			"optional": true
+		},
+		"@earendil-works/pi-tui": {
+			"optional": true
+		},
+		"typebox": {
+			"optional": true
+		}
 	}
 }
