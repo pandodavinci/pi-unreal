@@ -70,6 +70,8 @@ export class EventMapper {
 	readonly stats = emptyStats();
 	/** Last assistant message; phase "final_answer" wins over commentary. */
 	finalText = "";
+	/** True once the runner persisted the user's prompt (an external input item), i.e. Unreal's session has it. */
+	promptPersisted = false;
 	/** Stop reason of the last model response ("complete", "max_output_tokens", "refused"), or "failed". */
 	lastStop = "";
 	#finalIsAnswer = false;
@@ -96,6 +98,9 @@ export class EventMapper {
 			return [{ kind: "partial", partialKind, itemId: String(item.item_id ?? ""), delta: String(item.delta ?? "") }];
 		}
 		switch (item?.Kind) {
+			case "input":
+				if (item.Data?.Kind === "external") this.promptPersisted = true;
+				return [];
 			case "turn":
 				return [{ kind: "turn", turnId: String(item.Data?.ID ?? "") }];
 			case "model_response":

@@ -45,7 +45,7 @@ beforeAll(async () => {
 					id: `resp-${modelRequests}`,
 					status: "completed",
 					output: [
-						{ id: "fc-1", type: "function_call", call_id: `call-${modelRequests}`, name: "Bash", arguments: '{"command":"echo agent-ran"}', status: "completed" },
+						{ id: "fc-1", type: "function_call", call_id: `call-${modelRequests}`, name: "Bash", arguments: '{"command":"echo $((6*7))"}', status: "completed" },
 					],
 				});
 			}
@@ -71,6 +71,18 @@ afterAll(() => {
 	model?.stop(true);
 	attacker?.stop(true);
 });
+
+/** Texts of every function_call_output item the runner sent to the model. */
+function toolOutputs(bodies: string[]): string[] {
+	const outputs: string[] = [];
+	for (const body of bodies) {
+		const request = JSON.parse(body) as { input?: { type?: string; output?: unknown }[] };
+		for (const item of request.input ?? []) {
+			if (item.type === "function_call_output") outputs.push(JSON.stringify(item.output));
+		}
+	}
+	return outputs;
+}
 
 function cleanEnv(extra: Record<string, string>): Record<string, string | undefined> {
 	const env: Record<string, string | undefined> = { ...process.env };
@@ -117,8 +129,8 @@ describe.skipIf(!live)("workspace .env attacks (unreal-agent#5), real runner", (
 			const result = await runUnreal({ task: "hi", cwd: workspace, stateDir: tmpdir(), command: [runner], env });
 			expect(result.status).toBe("completed");
 			expect(fs.existsSync(marker)).toBe(false);
-			// The agent's own command still ran and its output went back to the model.
-			expect(modelBodies.some(body => body.includes("agent-ran"))).toBe(true);
+			// The agent's own command still ran: its output (42, which is not in the command text) came back.
+			expect(toolOutputs(modelBodies).some(output => output.includes("42"))).toBe(true);
 		}, 60_000);
 	}
 

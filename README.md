@@ -23,10 +23,10 @@
 
 ### Demo
 
-![pi-unreal demo](docs/demo.gif)
+<!-- Add the recording at docs/demo.gif, then replace this comment with: ![pi-unreal demo](docs/demo.gif) -->
 
 > [!NOTE]
-> `docs/demo.gif` is a placeholder until the recording is added.
+> Demo recording coming soon (`docs/demo.gif`).
 
 ## Features
 
@@ -34,7 +34,7 @@
 - **Unreal as a background worker.** `/unreal fix the failing tests` runs in the background while you keep chatting. Progress shows above the editor, the result lands in the chat.
 - **One plugin, two hosts.** The same package installs into [Pi](https://github.com/badlogic/pi-mono) and [Oh My Pi](https://github.com/can1357/oh-my-pi).
 - **Real cancellation.** Esc stops Unreal and the commands it started, including ones that ignore Ctrl-C (see [Limitations](#limitations) for the edge case).
-- **Safer in other people's repos.** Unreal loads a project's `.env`, which lets a repo steal your API key or run code in every shell command ([unreal-agent#5](https://github.com/unreallabsai/unreal-agent/issues/5)). pi-unreal keeps the `.env` away from Unreal, and tests run both attacks against the real runner.
+- **Safer in other people's repos.** Unreal loads a project's `.env`, which lets a repo steal your API key or run code in every shell command ([unreal-agent#5](https://github.com/unreallabsai/unreal-agent/issues/5)). pi-unreal neutralizes the `.env`, and tests run these attacks against the real runner.
 - **Zero setup for Unreal itself.** The official runner is downloaded on first use and checked against its published SHA-256.
 
 ## Install
@@ -111,7 +111,7 @@ flowchart LR
   ext -- "live steps, answer, stats" --> host
 ```
 
-In `--unreal` mode your typed messages are handled before they reach Pi's agent loop, and pi-unreal never wakes Pi's model, so Pi makes no model calls of its own. Unreal keeps one persisted session per Pi session.
+In `--unreal` mode the messages you type are handled before they reach Pi's agent loop, and pi-unreal never wakes Pi's model. Slash commands and other extensions can still start Pi turns. Unreal keeps one persisted session per Pi session.
 
 ### Configuration
 
@@ -127,13 +127,13 @@ In `--unreal` mode your typed messages are handled before they reach Pi's agent 
 | `PI_UNREAL_TRUST_DOTENV=1` | off | Let a trusted project's `.env` reach Unreal (model credentials, endpoints and proxies stay pinned) |
 | `PI_UNREAL_DEBUG=1` | off | Write every runner event to `<state>/debug.log` (private file) |
 
-Set these in your shell, not in a project's `.env`: by default pi-unreal hides a project's `.env` from Unreal entirely.
+Set these in your shell, not in a project's `.env`: by default pi-unreal neutralizes every variable a project's `.env` defines.
 
 > [!NOTE]
 > **Streaming.** Released Unreal runners (v0.1.1) accept `include_partial_messages` but ignore it, so each reply appears when it is complete while the step list updates live. pi-unreal already requests streaming and shows replies word by word with any runner that implements it.
 
 > [!WARNING]
-> Unreal Agent runs shell commands in your project with your permissions, like any coding agent. pi-unreal keeps a repo's `.env` from reaching Unreal, but a malicious repo can still try to steer the agent through its files. Details in [SECURITY.md](SECURITY.md).
+> Unreal Agent runs shell commands in your project with your permissions, like any coding agent. pi-unreal neutralizes a repo's `.env`, but a malicious repo can still try to steer the agent through its files. Details in [SECURITY.md](SECURITY.md).
 
 ### Limitations
 

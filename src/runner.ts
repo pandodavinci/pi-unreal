@@ -54,6 +54,8 @@ export interface UnrealRunResult {
 	exitCode: number | null;
 	signalCode: string | null;
 	stopReason: string;
+	/** The runner persisted the prompt, so Unreal's session contains this turn. */
+	promptPersisted: boolean;
 	finalText: string;
 	stats: RunStats;
 	durationMs: number;
@@ -128,7 +130,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	const debug = opts.debugLog ?? (() => {});
 	const logDir = path.join(opts.stateDir, "logs");
 	const mapper = new EventMapper();
-	const base = { signalCode: null, stopReason: "", finalText: "", stats: mapper.stats, stderr: "", logDir, killedDescendants: 0 };
+	const base = { signalCode: null, stopReason: "", promptPersisted: false, finalText: "", stats: mapper.stats, stderr: "", logDir, killedDescendants: 0 };
 
 	if (opts.signal?.aborted || opts.forceSignal?.aborted) {
 		return { ...base, status: "cancelled", exitCode: null, durationMs: 0 };
@@ -394,6 +396,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		exitCode,
 		signalCode,
 		stopReason: mapper.lastStop,
+		promptPersisted: mapper.promptPersisted,
 		finalText: mapper.finalText,
 		stats: mapper.stats,
 		durationMs: performance.now() - started,

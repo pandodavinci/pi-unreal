@@ -179,6 +179,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 					exitCode: null,
 					signalCode: null,
 					stopReason: "",
+					promptPersisted: false,
 					finalText: "",
 					stats: emptyStats(),
 					durationMs: Date.now() - job.startedAt,

@@ -12,6 +12,7 @@
  *
  * Start with `pi --unreal` (or PI_UNREAL_MODE=1). Toggle any time: /harness unreal | pi
  */
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext, InputEvent } from "@earendil-works/pi-coding-agent";
@@ -34,8 +35,11 @@ const SHUTDOWN_FORCE_WAIT_MS = 500;
 interface AnswerDetails {
 	/** What the user sees; `content` is the model-facing version, labeled for the host's model. */
 	body: string;
-	/** True when the runner actually ran this turn (so Unreal's session contains it). */
+	/** True when the runner persisted the prompt (so Unreal's session contains this turn). */
 	delivered: boolean;
+	turnId: string;
+	/** Host entries whose content was sent to Unreal as context with this turn. */
+	contextIds: string[];
 	status: UnrealRunResult["status"];
 	footer: string;
 	steps: string[];
@@ -60,6 +64,7 @@ interface LiveView {
 
 /** Session entry shapes shared by Pi and Oh My Pi (`message` and `custom_message`). */
 interface Entry {
+	id?: string;
 	type?: string;
 	customType?: string;
 	content?: unknown;
@@ -110,7 +115,6 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		  }
 		| undefined;
 	let ticker = false;
-	let turnCounter = 0;
 	let view: LiveView | undefined;
 	let renderQueued = false;
 
@@ -217,7 +221,8 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const steps: string[] = [];
 		const startedAt = Date.now();
 		const turnState = { liveText: "", liveItem: "", thinking: "" };
-		const task = withContext(conversationContext(ctx, turn), withImages(turn.text, turn.images));
+		const context = conversationContext(ctx, turn);
+		const task = withContext(context.text, withImages(turn.text, turn.images));
 		const done = runUnreal({
 			task,
 			cwd: ctx.cwd,
@@ -286,7 +291,16 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			result.status === "cancelled"
 				? "[Unreal Agent: the user stopped this turn. It is not pending work.]"
 				: `[Unreal Agent reply${result.status === "completed" ? "" : `, ${result.status}`}]\n${body || error || ""}`;
-		post(ANSWER_TYPE, forModel, { body, delivered: result.exitCode !== null, status: result.status, footer, steps, error } satisfies AnswerDetails);
+		post(ANSWER_TYPE, forModel, {
+			body,
+			delivered: result.promptPersisted,
+			turnId: turn.id,
+			contextIds: result.promptPersisted ? context.ids : [],
+			status: result.status,
+			footer,
+			steps,
+			error,
+		} satisfies AnswerDetails);
 	};
 
 	const pump = async () => {
@@ -324,52 +338,62 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			: text;
 
 	/**
-	 * What Unreal has not seen yet, as text. If Unreal has no session for this chat (new, forked or resumed
-	 * chat), that is the whole visible history. Otherwise it is everything after Unreal's last delivered
-	 * answer: messages the host's model handled, other extensions' messages (e.g. background results) and
-	 * messages of ours that never reached Unreal. Turns still queued are excluded. Keeps the last
-	 * MAX_CONTEXT_CHARS characters.
+	 * What Unreal has not seen yet. If Unreal has no session for this chat (new, forked or resumed chat), that
+	 * is the whole visible history. Otherwise it is every entry that no delivered turn recorded as seen:
+	 * messages the host's model handled, other extensions' messages (e.g. background results, including ones
+	 * that arrived during an earlier turn) and messages of ours that never reached Unreal. Turns still queued
+	 * are excluded. Keeps the last MAX_CONTEXT_CHARS characters.
 	 */
-	const conversationContext = (ctx: ExtensionContext, turn: Turn): string => {
+	const conversationContext = (ctx: ExtensionContext, turn: Turn): { text: string; ids: string[] } => {
 		let branch: Entry[];
 		try {
 			branch = ctx.sessionManager.getBranch() as Entry[];
 		} catch {
-			return "";
+			return { text: "", ids: [] };
 		}
+		const key = (entry: Entry, index: number) => entry.id ?? `index:${index}`;
 		const unrealHasSession = fs.existsSync(path.join(stateRoot, "sessions", `${turn.sessionId}.session.jsonl`));
-		let start = 0;
+		const seen = new Set<string>();
+		const deliveredTurns = new Set<string>();
 		if (unrealHasSession) {
 			branch.forEach((entry, index) => {
-				if (entry.customType === ANSWER_TYPE && (entry.details as AnswerDetails | undefined)?.delivered) start = index + 1;
+				const details = entry.details as Partial<AnswerDetails> | undefined;
+				if (entry.customType !== ANSWER_TYPE || !details?.delivered) return;
+				seen.add(key(entry, index));
+				if (details.turnId) deliveredTurns.add(details.turnId);
+				for (const id of details.contextIds ?? []) seen.add(id);
 			});
 		}
 		const pending = new Set([turn.id, ...queue.map(queued => queued.id)]);
 		const lines: string[] = [];
-		for (const entry of branch.slice(start)) {
+		const ids: string[] = [];
+		branch.forEach((entry, index) => {
+			const id = key(entry, index);
+			if (seen.has(id)) return;
+			let line: string | undefined;
 			if (entry.type === "message" && entry.message) {
 				const { role, content } = entry.message;
 				const text = textOf(content);
-				if (text && (role === "user" || role === "assistant")) lines.push(`${role === "user" ? "User" : "Pi"}: ${text}`);
-				continue;
-			}
-			if (entry.customType === USER_TYPE) {
+				if (text && (role === "user" || role === "assistant")) line = `${role === "user" ? "User" : "Pi"}: ${text}`;
+			} else if (entry.customType === USER_TYPE) {
 				const details = entry.details as { text?: string; turnId?: string } | undefined;
-				if (details?.turnId && pending.has(details.turnId)) continue;
+				if (details?.turnId && (pending.has(details.turnId) || deliveredTurns.has(details.turnId))) return;
 				const label = unrealHasSession ? "User (a message that did not reach you)" : "User (to you, Unreal)";
-				lines.push(`${label}: ${details?.text ?? textOf(entry.content)}`);
-				continue;
+				line = `${label}: ${details?.text ?? textOf(entry.content)}`;
+			} else if (entry.customType === ANSWER_TYPE) {
+				const details = entry.details as Partial<AnswerDetails> | undefined;
+				if (details?.delivered && details.body) line = `You (Unreal): ${details.body}`;
+			} else {
+				const text = textOf(entry.content);
+				if (entry.customType && text) line = `[${entry.customType}] ${text}`;
 			}
-			if (entry.customType === ANSWER_TYPE) {
-				const details = entry.details as AnswerDetails | undefined;
-				if (details?.delivered && details.body) lines.push(`You (Unreal): ${details.body}`);
-				continue;
+			if (line) {
+				lines.push(line);
+				ids.push(id);
 			}
-			const text = textOf(entry.content);
-			if (entry.customType && text) lines.push(`[${entry.customType}] ${text}`);
-		}
+		});
 		const joined = lines.join("\n\n");
-		return joined.length > MAX_CONTEXT_CHARS ? `…${joined.slice(-MAX_CONTEXT_CHARS)}` : joined;
+		return { text: joined.length > MAX_CONTEXT_CHARS ? `…${joined.slice(-MAX_CONTEXT_CHARS)}` : joined, ids };
 	};
 	const withContext = (context: string, text: string) =>
 		context
@@ -424,7 +448,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		}
 		const images = event.images?.length ? await saveImages(event.images) : [];
 		const shown = images.length ? `${text}  [${images.length} image${images.length > 1 ? "s" : ""}]` : text;
-		const turnId = `t${++turnCounter}`;
+		const turnId = randomUUID();
 		post(USER_TYPE, `[User message sent to Unreal Agent, which handles it]\n${shown}`, { text: shown, turnId });
 		queue.push({ id: turnId, text, images, sessionId: `pi-${ctx.sessionManager.getSessionId()}` });
 		void pump();

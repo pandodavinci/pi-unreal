@@ -32,6 +32,7 @@ const spawnDescendant = async () => {
 if (mode === "echo") {
 	// Answers with the exact prompt it was given (the JSON request is the last argument).
 	const request = JSON.parse(process.argv.at(-1) ?? "{}") as { prompt?: string; session_id?: string };
+	item("input", { ID: "in1", Kind: "external", Payload: request.prompt });
 	item("turn", { ID: "t1" });
 	item("model_response", {
 		Response: {

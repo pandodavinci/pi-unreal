@@ -44,11 +44,12 @@ export const PINNED_ENV = [
 
 /**
  * Names that must not come from an untrusted .env and cannot be neutralized with an empty value:
- * the runner applies SANDBOX_EGRESS_PROXY even when it is already set, and an empty BASH_FUNC_* entry is
- * still a (broken) function definition for Bash to import.
+ * the runner applies SANDBOX_EGRESS_PROXY even when it is already set; an empty BASH_FUNC_* entry is still a
+ * (broken) function definition for Bash to import; and for git, set-but-empty often differs from unset
+ * (GIT_SSL_NO_VERIFY disables certificate checks when merely present, GIT_CONFIG_GLOBAL="" is a file named "").
  */
 export function isUnpinnable(name: string): boolean {
-	return name === "SANDBOX_EGRESS_PROXY" || name.startsWith("BASH_FUNC_");
+	return name === "SANDBOX_EGRESS_PROXY" || name.startsWith("BASH_FUNC_") || name.startsWith("GIT_");
 }
 
 /** Go's unicode.IsSpace, which strings.TrimSpace uses. JavaScript's \s differs (U+0085, U+FEFF). */
@@ -110,24 +111,7 @@ export function hardenEnvironment(
 	return out;
 }
 
-/**
- * An empty value is not the same as an unset one for some tools (git reads GIT_CONFIG_GLOBAL="" as a file
- * named ""). For those, use what the tool would do when the variable is unset.
- */
+/** zsh reads ZDOTDIR="" as "/"; unset means $HOME. Everything else is neutralized with an empty value. */
 function neutralValue(name: string, env: Record<string, string | undefined>): string {
-	const home = env.HOME ?? "";
-	switch (name) {
-		case "GIT_CONFIG_GLOBAL": {
-			const xdg = path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "git", "config");
-			const legacy = path.join(home, ".gitconfig");
-			return fs.existsSync(legacy) ? legacy : fs.existsSync(xdg) ? xdg : "/dev/null";
-		}
-		case "GIT_SSH_COMMAND":
-		case "GIT_SSH":
-			return "ssh";
-		case "ZDOTDIR":
-			return home;
-		default:
-			return "";
-	}
+	return name === "ZDOTDIR" ? (env.HOME ?? "") : "";
 }

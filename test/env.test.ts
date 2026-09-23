@@ -31,18 +31,8 @@ describe("hardenEnvironment", () => {
 		for (const name of PINNED_ENV) expect(env[name]).toBeDefined();
 	});
 
-	test("tools that treat empty differently from unset get their unset behavior", () => {
-		const home = tmpdir();
-		const env = hardenEnvironment({ HOME: home }, ["GIT_CONFIG_GLOBAL", "GIT_SSH_COMMAND", "ZDOTDIR"]);
-		expect(env.GIT_CONFIG_GLOBAL).toBe("/dev/null"); // no global config exists in this HOME
-		expect(env.GIT_SSH_COMMAND).toBe("ssh");
-		expect(env.ZDOTDIR).toBe(home);
-		fs.writeFileSync(path.join(home, ".gitconfig"), "[user]\n\tname = me\n");
-		expect(hardenEnvironment({ HOME: home }, ["GIT_CONFIG_GLOBAL"]).GIT_CONFIG_GLOBAL).toBe(path.join(home, ".gitconfig"));
-		const git = Bun.spawnSync(["git", "config", "--global", "user.name"], {
-			env: { ...hardenEnvironment({ HOME: home, PATH: process.env.PATH }, ["GIT_CONFIG_GLOBAL"]), DEVELOPER_DIR: process.env.DEVELOPER_DIR },
-		});
-		expect(git.stdout.toString().trim()).toBe("me");
+	test("ZDOTDIR is neutralized to its unset meaning ($HOME), not to an empty string", () => {
+		expect(hardenEnvironment({ HOME: "/home/me" }, ["ZDOTDIR"]).ZDOTDIR).toBe("/home/me");
 	});
 
 	test("nothing outside the .env and the runner settings is touched (no empty GIT_SSH_COMMAND, ZDOTDIR, ...)", () => {
@@ -52,9 +42,11 @@ describe("hardenEnvironment", () => {
 });
 
 describe("refusals", () => {
-	test("SANDBOX_EGRESS_PROXY and BASH_FUNC_* cannot be neutralized with an empty value", () => {
+	test("names an empty value cannot neutralize are refused (proxy, Bash functions, git's variables)", () => {
 		expect(isUnpinnable("SANDBOX_EGRESS_PROXY")).toBe(true);
 		expect(isUnpinnable("BASH_FUNC_ls%%")).toBe(true);
+		expect(isUnpinnable("GIT_SSL_NO_VERIFY")).toBe(true); // disables TLS checks when merely present
+		expect(isUnpinnable("GIT_CONFIG_GLOBAL")).toBe(true);
 		expect(isUnpinnable("PS4")).toBe(false);
 	});
 

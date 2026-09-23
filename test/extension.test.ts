@@ -107,6 +107,31 @@ describe("--unreal mode", () => {
 		expect(body).not.toContain("earlier");
 	});
 
+	test("a turn whose runner failed before saving the prompt is not treated as delivered", async () => {
+		const host = await setup("error", { flags: { unreal: true } });
+		unrealSessionExists("pi-s1");
+		await host.emit("input", { text: "use port 8080", source: "interactive" });
+		await waitFor(() => answers(host).length === 1);
+		expect((answers(host)[0]!.message.details as { delivered: boolean }).delivered).toBe(false);
+	});
+
+	test("a background result that arrived during a turn reaches Unreal with the next one", async () => {
+		const host = await setup("echo", { flags: { unreal: true } });
+		unrealSessionExists("pi-s1");
+		host.state.branch = [
+			{ id: "a1", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "prev", delivered: true, turnId: "t0", contextIds: [] } },
+			{ id: "y1", type: "custom_message", customType: "unreal-you", content: "x", details: { text: "current", turnId: "t1" } },
+			// Arrived while turn t1 was running, after its context was captured:
+			{ id: "r1", type: "custom_message", customType: "unreal-result", content: "[unreal u2] build failed" },
+			{ id: "a2", type: "custom_message", customType: "unreal-answer", content: "x", details: { body: "ok", delivered: true, turnId: "t1", contextIds: [] } },
+		];
+		await host.emit("input", { text: "fix it", source: "interactive" });
+		await waitFor(() => answers(host).length === 1);
+		const body = (answers(host)[0]!.message.details as { body: string }).body;
+		expect(body).toContain("build failed");
+		expect(body).not.toContain("current"); // delivered turn t1 is not repeated
+	});
+
 	test("a message sent while the host is still busy reaches neither agent", async () => {
 		const host = await setup("echo", { flags: { unreal: true } });
 		host.state.idle = false;

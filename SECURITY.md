@@ -18,12 +18,12 @@ By default the project's `.env` never reaches Unreal:
 1. pi-unreal parses the `.env` with the same rules as the runner's Go parser (including Go's definition of
    whitespace), so both always agree on which variable names it defines.
 2. Right before the runner starts, every one of those names is set: to your own value if you have one,
-   otherwise to what "unset" means for it (an empty string, or for a few tools that treat empty differently,
-   their default: `GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`, `GIT_SSH`, `ZDOTDIR`). The runner skips variables
-   that are already set, so it ignores the whole file.
-3. Two kinds of names cannot be neutralized that way and cause a refusal before anything runs:
-   `SANDBOX_EGRESS_PROXY` (the runner applies it even when already set) and `BASH_FUNC_*` (an empty value is still
-   a function definition for Bash).
+   otherwise to an empty string (`ZDOTDIR` to `$HOME`, which is what zsh does when it is unset). The runner
+   skips variables that are already set, so it ignores the file's values.
+3. Names that an empty value cannot neutralize cause a refusal before anything runs:
+   `SANDBOX_EGRESS_PROXY` (the runner applies it even when already set), `BASH_FUNC_*` (an empty value is still
+   a function definition for Bash) and every `GIT_*` variable (for git, set-but-empty often differs from unset:
+   `GIT_SSL_NO_VERIFY` disables certificate checks when merely present).
 4. The runner's own credentials and endpoints (`UNREAL_HARNESS_LLM_*`, provider API keys, Codex auth, proxy and
    TLS settings) are pinned in every mode, and `SANDBOX_EGRESS_PROXY` is refused in every mode.
 
@@ -31,8 +31,14 @@ Side effect: tools the agent runs will not see the project's `.env` values eithe
 itself sees them as already set (to empty). For a repository you trust, `PI_UNREAL_TRUST_DOTENV=1` lets the
 `.env` through; step 4 still applies.
 
-Limit: pi-unreal and the runner read the `.env` separately, a moment apart. A process that rewrites the file in
-that instant is outside this protection.
+Limits:
+
+- An empty value equals unset for almost every program, but not all. A variable whose mere presence changes a
+  tool's behavior, and that is not in the refusal list, still reaches the agent's commands as an empty value.
+- pi-unreal and the runner read the `.env` separately, a moment apart. A process that rewrites the file in that
+  instant is outside this protection.
+
+The complete fix belongs upstream: a runner option to not load the workspace `.env` at all.
 
 `test/security.test.ts` checks this against the real runner with a local fake model that asks for one shell
 command:
