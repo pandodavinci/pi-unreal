@@ -70,20 +70,21 @@ export async function resolveRunner(
 		throw new RunnerSetupError(`PI_UNREAL_RUNNER_VERSION is not a release version (like ${RUNNER_VERSION}): ${version}`);
 	}
 	const target = path.join(stateRoot(env), "bin", version, platformTag(), BINARY);
-	if (cachedBinaryIsIntact(target)) {
-		// Marks the version as in use, so housekeeping keeps it (state.ts).
+	// Marks the version as in use, so housekeeping keeps it (state.ts).
+	const markUsed = (bin: string) => {
 		try {
 			const now = new Date();
 			fs.utimesSync(path.join(stateRoot(env), "bin", version), now, now);
 		} catch {}
-		return target;
-	}
+		return bin;
+	};
+	if (cachedBinaryIsIntact(target)) return markUsed(target);
 	let pending = inflight.get(target);
 	if (!pending) {
 		pending = download(version, target, log, fetchImpl).finally(() => inflight.delete(target));
 		inflight.set(target, pending);
 	}
-	return pending;
+	return pending.then(markUsed);
 }
 
 /** The installed binary must be executable and match the hash recorded when it was verified. */

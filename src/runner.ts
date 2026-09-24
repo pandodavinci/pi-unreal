@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Readable } from "node:stream";
 import { resolveRunner, RunnerSetupError } from "./binary";
-import { hardenEnvironment, inspectDotEnv, isUnpinnable, shellHook, unpinnableReason } from "./env";
+import { hardenEnvironment, inspectDotEnv, isUnpinnable, own, shellHook, unpinnableReason } from "./env";
 import { type BridgeEvent, EventMapper, type RunStats } from "./events";
 
 export interface UnrealRunOptions {
@@ -200,7 +200,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			.map(name => `${name} (${unpinnableReason(name)})`)
 			.join(", ")}, which pi-unreal cannot keep away from Unreal Agent. Remove or rename ${refused.length > 1 ? "them" : "it"}${
 			// PI_UNREAL_TRUST_DOTENV=1 lets everything through except SANDBOX_EGRESS_PROXY.
-			trustDotEnv || refused.every(name => name === "SANDBOX_EGRESS_PROXY") ? "" : ", or set PI_UNREAL_TRUST_DOTENV=1 if you trust this repository"
+			trustDotEnv || refused.includes("SANDBOX_EGRESS_PROXY") ? "" : ", or set PI_UNREAL_TRUST_DOTENV=1 if you trust this repository"
 		}.`,
 	});
 	const early = readDotEnv();
@@ -273,7 +273,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	} catch (err) {
 		debug(`shell hook not installed, commands keep the empty placeholders: ${String(err)}`);
 	}
-	base.dotEnvEmpty = hooked || trustDotEnv ? [] : dotEnv.report.names.filter(name => configured[name] === undefined);
+	base.dotEnvEmpty = hooked || trustDotEnv ? [] : dotEnv.report.names.filter(name => own(configured, name) === undefined);
 	debug(`spawn ${JSON.stringify(argv)} provider=${env.UNREAL_HARNESS_LLM_PROVIDER} model=${env.UNREAL_HARNESS_LLM_MODEL}`);
 
 	// Node APIs only: Pi runs extensions on Node, Oh My Pi on the Bun runtime.

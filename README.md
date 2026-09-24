@@ -126,7 +126,7 @@ In `--unreal` mode the messages you type are handled before they reach Pi's agen
 | `PI_UNREAL_RUNNER_VERSION` | `0.2.0` | Download another Unreal release (verified the same way) |
 | `PI_UNREAL_MODE=1` | off | Same as `--unreal` |
 | `PI_UNREAL_THINKING` | runner default (`high`) | `low`, `medium`, `high`, `xhigh`, `max` |
-| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images. Run logs and job output are removed after 14 days; Unreal sessions, their command output and pasted images after 60 days without use, older runner downloads after 14 days unused. Cleanup never touches a directory that already held other files. |
+| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images. Run logs and job output are removed after 14 days; Unreal sessions, their command output and pasted images after 60 days without use, older runner downloads after 14 days unused. Cleanup runs only in the default directory or one pi-unreal created (or found empty). |
 | `PI_UNREAL_TRUST_DOTENV=1` | off | Let a trusted project's `.env` reach Unreal (model credentials, endpoints and proxies stay pinned) |
 | `PI_UNREAL_DEBUG=1` | off | Write every runner event to `<state>/debug.log` (private file) |
 
@@ -143,7 +143,7 @@ Set these in your shell, not in a project's `.env`: unless you set `PI_UNREAL_TR
 - Unreal uses its own tools (Bash, ViewImage, skills in `.harness/skills`). Pi's tools, skills and MCP servers are not available to it.
 - Commands are tracked by polling Unreal's process tree 4 times a second. A command started and orphaned by Unreal in the instant before it exits (on a crash, or while stopping) can survive cleanup.
 - Stopped and dropped messages are remembered (the newest 20,000) so they are never replayed to Unreal, also in forks.
-- With a shell other than bash or zsh, Unreal's commands see a project's `.env` variables as empty (the result says so). A `.env` that sets git's own `GIT_` settings or shell internals (`BASH_*`, `FPATH`, ...) is refused, with the reason; rename them or set `PI_UNREAL_TRUST_DOTENV=1` for a repo you trust.
+- With a shell other than bash or zsh, Unreal's commands see a project's `.env` variables as empty (the result says so). A `.env` that sets git's own `GIT_` settings or the shell's own variables (`BASH_SOURCE`, `FPATH`, ...) is refused, with the reason; rename them or set `PI_UNREAL_TRUST_DOTENV=1` for a repo you trust.
 - Tested by hand on Pi 0.87.1 and Oh My Pi 18.2.8 to 18.2.11 (macOS arm64). CI runs the test suite on macOS and Linux, loads the plugin on Node, and drives the real `pi` and `omp` binaries end to end.
 
 ## Contributing

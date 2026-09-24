@@ -52,19 +52,28 @@ describe("refusals", () => {
 		expect(isUnpinnable("PS4")).toBe(false);
 	});
 
-	test("shell internals whose empty value breaks shell startup are refused; BASH_ENV is handled by the hook", () => {
-		for (const name of ["BASH_SOURCE", "BASH_ARGV", "BASHOPTS", "DIRSTACK", "POSIXLY_CORRECT", "FPATH", "FUNCNEST", "NULLCMD"]) {
-			expect({ name, reason: unpinnableReason(name) }).toEqual({ name, reason: "the shell itself reads it when it starts, even when it is empty" });
+	test("the shells' own variables whose empty value breaks them are refused; ordinary names are not", () => {
+		for (const name of ["BASH_SOURCE", "BASH_ARGV", "FUNCNAME", "DIRSTACK", "POSIXLY_CORRECT", "FPATH", "FUNCNEST", "TMPPREFIX", "commands", "options"]) {
+			expect({ name, reason: unpinnableReason(name) }).toEqual({ name, reason: "it is one of the shell's own variables, which an empty value breaks" });
 		}
-		expect(isUnpinnable("BASH_ENV")).toBe(false);
-		expect(isUnpinnable("BASH_ENVIRONMENT")).toBe(true);
+		for (const name of ["BASH_ENV", "BASHFUL_API_KEY", "ZSH_VERSION", "HOST", "UID", "HISTORY_URL"]) expect({ name, refused: isUnpinnable(name) }).toEqual({ name, refused: false });
 	});
 
-	test("SANDBOX_EGRESS_PROXY's refusal does not suggest PI_UNREAL_TRUST_DOTENV (which refuses it too)", async () => {
-		const dir = tmpdir();
-		fs.writeFileSync(path.join(dir, ".env"), "SANDBOX_EGRESS_PROXY=http://evil:8080\n");
-		const result = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"] });
-		expect(result.errorMessage).not.toContain("PI_UNREAL_TRUST_DOTENV");
+	test("PI_UNREAL_TRUST_DOTENV is not suggested when SANDBOX_EGRESS_PROXY is among the refused (it refuses it too)", async () => {
+		for (const text of ["SANDBOX_EGRESS_PROXY=http://evil:8080\n", "SANDBOX_EGRESS_PROXY=http://evil:8080\nGIT_DIR=/x\n"]) {
+			const dir = tmpdir();
+			fs.writeFileSync(path.join(dir, ".env"), text);
+			const result = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"] });
+			expect(result.errorMessage).not.toContain("PI_UNREAL_TRUST_DOTENV");
+		}
+	});
+
+	test("names that exist on every JavaScript object (constructor, __proto__) are neutralized like any other", () => {
+		const names = ["constructor", "toString", "__proto__"];
+		const env = hardenEnvironment({ PATH: process.env.PATH }, names);
+		for (const name of names) expect({ name, own: Object.hasOwn(env, name), value: env[name] }).toEqual({ name, own: true, value: "" });
+		const printed = spawnSync("/usr/bin/env", { env: env as NodeJS.ProcessEnv, encoding: "utf8" }).stdout.split("\n");
+		for (const name of names) expect(printed).toContain(`${name}=`);
 	});
 
 	test("build metadata under GIT_ names that git never reads is neutralized like any other name", () => {
@@ -210,6 +219,18 @@ describe("shellHook: Unreal's commands get your own environment back", () => {
 
 	test.skipIf(!shells.includes("/bin/zsh"))("zsh: the probe asks zsh itself (this machine's system zshenv keeps ZDOTDIR)", () => {
 		expect(zshHonorsZdotdir("/bin/zsh", { PATH: process.env.PATH, HOME: tmpdir() })).toBe(true);
+	});
+
+	test("bash: a BASH_ENV of yours built with command substitution still runs", () => {
+		const env = home();
+		fs.writeFileSync(path.join(env.HOME, "startup"), "export FROM_MY_STARTUP=substituted\n");
+		const out = runCommand({ ...env, SHELL: "/bin/bash", BASH_ENV: '$(printf "%s" "$HOME")/startup' }, ["DATABASE_URL"], 'printf "%s|%s" "${FROM_MY_STARTUP-no}" "${DATABASE_URL-unset}"');
+		expect(out).toBe("substituted|unset");
+	});
+
+	test.skipIf(!shells.includes("/bin/zsh"))("zsh: a variable zsh sets itself keeps its value (ZSH_VERSION), only placeholders go", () => {
+		const out = runCommand({ ...home(), SHELL: "/bin/zsh" }, ["ZSH_VERSION", "DATABASE_URL"], 'printf "%s|%s" "${ZSH_VERSION:+kept}" "${DATABASE_URL-unset}"');
+		expect(out).toBe("kept|unset");
 	});
 
 	test("bash: a BASH_ENV of yours with quotes in its file name still runs", () => {

@@ -57,6 +57,17 @@ describe("binary", () => {
 		expect(requested.length).toBeGreaterThan(0);
 	});
 
+	test("a download marks its version as in use, like a cache hit (housekeeping keeps it)", async () => {
+		const state = tmpdir();
+		const versionDir = path.join(state, "bin", RUNNER_VERSION);
+		fs.mkdirSync(path.join(versionDir, platformTag()), { recursive: true });
+		const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+		fs.utimesSync(versionDir, old, old);
+		const { fetchImpl } = fakeRelease();
+		await resolveRunner({ PI_UNREAL_STATE_DIR: state }, undefined, fetchImpl);
+		expect(Date.now() - fs.statSync(versionDir).mtimeMs).toBeLessThan(60_000);
+	});
+
 	test("PI_UNREAL_RUNNER_VERSION must be a release version (it ends up in a URL and a path)", async () => {
 		const { fetchImpl, requested } = fakeRelease();
 		for (const version of ["../../etc", "latest", "1.2"]) {

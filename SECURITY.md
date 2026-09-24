@@ -25,17 +25,19 @@ By default the project's `.env` never reaches Unreal Agent:
    a function definition for Bash) and `GIT_*` variables (for git, set-but-empty often differs from unset:
    `GIT_SSL_NO_VERIFY` disables certificate checks when merely present). Build metadata that git never reads
    (`GIT_SHA`, `GIT_COMMIT_SHA`, `GIT_BRANCH`, `GIT_TAG` and a few more) is neutralized like any other name.
-   Shell internals that bash or zsh read at startup even when empty are refused too (`BASH_*` other than
-   `BASH_ENV`, `POSIXLY_CORRECT`, `FPATH`, ...): with macOS's bash, an empty `BASH_SOURCE` makes a startup file
-   that finds its helpers through it load them from the project instead.
+   The shells' own variables that bash or zsh take from the environment even when empty are refused too
+   (`BASH_SOURCE`, `FUNCNAME`, `POSIXLY_CORRECT`, `FPATH`, zsh's `$commands` and `$options`, ...): with macOS's
+   bash, an empty `BASH_SOURCE` makes a startup file that finds its helpers through it load them from the
+   project instead.
 4. The runner's own credentials and endpoints (`UNREAL_HARNESS_LLM_*`, provider API keys, Codex auth, proxy and
    TLS settings) are pinned in every mode, and `SANDBOX_EGRESS_PROXY` is refused in every mode.
 
 5. The runner starts each command as `$SHELL -c <command>`. For bash and zsh, pi-unreal points `BASH_ENV` or
    `ZDOTDIR` at a startup file it writes for the run. That file removes the placeholders from steps 2 and 4
-   (except the shell's own special variables, such as zsh's `path`, which is tied to `PATH`), restores
-   `BASH_ENV`/`ZDOTDIR` and runs your own startup file, so each command starts with your own environment, as in
-   your terminal. A project's own tools can then load its `.env` themselves (dotenv and the
+   that still hold their placeholder (never a variable the shell set itself, or a zsh special such as `path`,
+   which is tied to `PATH`), restores `BASH_ENV`/`ZDOTDIR` and runs your own startup file (for bash, by starting
+   the command in a fresh bash that reads your `BASH_ENV` itself), so each command starts with your own
+   environment, as in your terminal. A project's own tools can then load its `.env` themselves (dotenv and the
    like), which they would do in your terminal too; plain commands such as `git status` never see its values.
 
 With another shell (`sh`, `fish`, ...) there is no startup file to use, so commands keep the empty

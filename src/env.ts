@@ -66,12 +66,86 @@ const GIT_METADATA = new Set([
 ]);
 
 /**
- * Shell internals that bash (3.2, macOS's) or zsh take from the environment at startup, where an empty value
- * breaks them: bash's BASH_SOURCE and friends (a startup file that locates its helpers through BASH_SOURCE
- * would then load them from the project), zsh's function path and nesting limit. No project needs these in
- * a .env. BASH_ENV is handled by the startup hook (and neutralized with other shells).
+ * The shells' own variables that bash (3.2, macOS's) or zsh take from the environment at startup, where an
+ * empty value breaks them: bash's BASH_SOURCE and friends (a startup file that finds its helpers through
+ * BASH_SOURCE would load them from the project instead), zsh's function path, nesting limit, temp file prefix
+ * and the tables of its parameter module ($commands, $options, ...). No project needs these in a .env.
+ * BASH_ENV and ZDOTDIR are handled by the startup hook (and neutralized for other shells).
  */
-const SHELL_INTERNAL = /^(BASH(?!_ENV$).*|DIRSTACK|GROUPS|POSIXLY_CORRECT|FPATH|FUNCNEST|NULLCMD|READNULLCMD)$/;
+const SHELL_INTERNAL = new Set([
+	// bash
+	"BASH",
+	"BASHOPTS",
+	"BASHPID",
+	"BASH_ALIASES",
+	"BASH_ARGC",
+	"BASH_ARGV",
+	"BASH_ARGV0",
+	"BASH_CMDS",
+	"BASH_COMMAND",
+	"BASH_COMPAT",
+	"BASH_EXECUTION_STRING",
+	"BASH_LINENO",
+	"BASH_LOADABLES_PATH",
+	"BASH_MONOSECONDS",
+	"BASH_REMATCH",
+	"BASH_SOURCE",
+	"BASH_SUBSHELL",
+	"BASH_TRAPSIG",
+	"BASH_VERSINFO",
+	"BASH_VERSION",
+	"BASH_XTRACEFD",
+	"DIRSTACK",
+	"FUNCNAME",
+	"GROUPS",
+	"POSIXLY_CORRECT",
+	// zsh
+	"FPATH",
+	"FUNCNEST",
+	"MODULE_PATH",
+	"NULLCMD",
+	"READNULLCMD",
+	"TMPPREFIX",
+	// zsh's zsh/parameter module
+	"aliases",
+	"builtins",
+	"commands",
+	"dirstack",
+	"dis_aliases",
+	"dis_builtins",
+	"dis_functions",
+	"dis_functions_source",
+	"dis_galiases",
+	"dis_patchars",
+	"dis_reswords",
+	"dis_saliases",
+	"funcfiletrace",
+	"funcsourcetrace",
+	"funcstack",
+	"functions",
+	"functions_source",
+	"functrace",
+	"galiases",
+	"history",
+	"historywords",
+	"jobdirs",
+	"jobstates",
+	"jobtexts",
+	"keymaps",
+	"modules",
+	"nameddirs",
+	"options",
+	"parameters",
+	"patchars",
+	"reswords",
+	"saliases",
+	"termcap",
+	"terminfo",
+	"userdirs",
+	"usergroups",
+	"widgets",
+	"zsh_scheduled_events",
+]);
 
 /**
  * Why a name must not come from an untrusted .env even though it cannot be neutralized with an empty value,
@@ -83,7 +157,7 @@ const SHELL_INTERNAL = /^(BASH(?!_ENV$).*|DIRSTACK|GROUPS|POSIXLY_CORRECT|FPATH|
 export function unpinnableReason(name: string): string | undefined {
 	if (name === "SANDBOX_EGRESS_PROXY") return "Unreal Agent would send all its traffic through that proxy";
 	if (name.startsWith("BASH_FUNC_")) return "it defines a shell function for every command";
-	if (SHELL_INTERNAL.test(name)) return "the shell itself reads it when it starts, even when it is empty";
+	if (SHELL_INTERNAL.has(name)) return "it is one of the shell's own variables, which an empty value breaks";
 	if (name.startsWith("GIT_") && !GIT_METADATA.has(name)) return "git acts on GIT_ settings even when they are empty";
 	return undefined;
 }
@@ -144,11 +218,17 @@ export function hardenEnvironment(
 	env: Record<string, string | undefined>,
 	neutralize: readonly string[] = [],
 ): Record<string, string | undefined> {
-	const out = { ...env };
+	// No prototype: a .env name like `constructor` or `__proto__` must become an entry like any other.
+	const out: Record<string, string | undefined> = Object.assign(Object.create(null), env);
 	for (const name of [...PINNED_ENV, ...neutralize]) {
-		if (out[name] === undefined) out[name] = neutralValue(name, env);
+		if (own(out, name) === undefined) out[name] = neutralValue(name, env);
 	}
 	return out;
+}
+
+/** env[name], ignoring anything inherited from Object.prototype. */
+export function own(env: Record<string, string | undefined>, name: string): string | undefined {
+	return Object.hasOwn(env, name) ? env[name] : undefined;
 }
 
 /** zsh reads ZDOTDIR="" as "/"; unset means $HOME. Everything else is neutralized with an empty value. */
@@ -157,25 +237,19 @@ function neutralValue(name: string, env: Record<string, string | undefined>): st
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const zdotdirProbes = new Map<string, boolean>();
-
 /**
- * Whether zsh still has the ZDOTDIR it was started with after its system zshenv (which runs first, even with
- * -f). Asked once per zsh binary; a zsh that does not answer within 2 seconds counts as no.
+ * Whether zsh, started the way the runner starts it (`zsh -c`) and with this environment, still has the
+ * ZDOTDIR it was given after its system zshenv, which runs first. The probe directory does not exist, so zsh
+ * reads nothing else. A zsh that does not answer within 2 seconds counts as no.
  */
 export function zshHonorsZdotdir(shell: string, env: Record<string, string | undefined>): boolean {
-	let honored = zdotdirProbes.get(shell);
-	if (honored === undefined) {
-		const probe = path.join(path.sep, "nonexistent", "pi-unreal-zdotdir-probe");
-		const result = spawnSync(shell, ["-f", "-c", 'print -rn -- "${ZDOTDIR-}"'], {
-			env: { ...env, ZDOTDIR: probe } as NodeJS.ProcessEnv,
-			encoding: "utf8",
-			timeout: 2_000,
-		});
-		honored = result.status === 0 && result.stdout === probe;
-		zdotdirProbes.set(shell, honored);
-	}
-	return honored;
+	const probe = path.join(path.sep, "nonexistent", "pi-unreal-zdotdir-probe");
+	const result = spawnSync(shell, ["-c", 'print -rn -- "${ZDOTDIR-}"'], {
+		env: { ...env, ZDOTDIR: probe } as NodeJS.ProcessEnv,
+		encoding: "utf8",
+		timeout: 2_000,
+	});
+	return result.status === 0 && result.stdout === probe;
 }
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 /**
@@ -224,7 +298,7 @@ export function shellHook(
 	// zsh reads the system zshenv first; if that sets ZDOTDIR, the hook would never run.
 	if (hookVar === "ZDOTDIR" && !zdotdirHonored(hardened.SHELL!.trim(), hardened)) return undefined;
 	const placeholders = Object.keys(hardened).filter(
-		name => original[name] === undefined && hardened[name] !== undefined && name !== hookVar && IDENTIFIER.test(name),
+		name => own(original, name) === undefined && own(hardened, name) !== undefined && name !== hookVar && IDENTIFIER.test(name),
 	);
 	if (placeholders.length === 0 && hardened[hookVar] === original[hookVar]) return undefined;
 	const mine = original[hookVar];
@@ -234,26 +308,29 @@ export function shellHook(
 		const file = path.join(dir, "bash_env");
 		// Bash expands BASH_ENV (including command substitution) before reading it.
 		if (/[$`\\]/.test(file)) return undefined;
-		for (const name of placeholders) if (!BASH_SPECIAL.has(name)) lines.push(`unset -v ${name} 2>/dev/null`);
+		// Only what still holds its placeholder: a variable the shell set itself keeps its value.
+		for (const name of placeholders) {
+			if (!BASH_SPECIAL.has(name)) lines.push(`[ "\${${name}-}" != ${shellQuote(hardened[name]!)} ] || unset -v ${name} 2>/dev/null`);
+		}
 		if (mine === undefined) {
 			lines.push("unset -v BASH_ENV");
 		} else {
-			lines.push(`export BASH_ENV=${shellQuote(mine)}`);
-			// Your own BASH_ENV, which bash expands before reading it (parameters, command substitution,
-			// arithmetic): the same expansions, as a double-quoted word in which quotes stay literal.
+			// Your own BASH_ENV, which bash expands before reading it: rather than imitate that, run the command
+			// in a fresh bash (same process) that reads it itself, from this clean environment.
 			lines.push(
-				/[$`]/.test(mine)
-					? `eval ${shellQuote(`__pi_unreal_startup="${mine.replace(/"/g, '\\"')}"`)}`
-					: `__pi_unreal_startup=${shellQuote(mine)}`,
-				'if [ -r "$__pi_unreal_startup" ]; then . "$__pi_unreal_startup"; fi',
-				"unset -v __pi_unreal_startup",
+				`export BASH_ENV=${shellQuote(mine)}`,
+				'if [ -n "${BASH_EXECUTION_STRING-}" ]; then exec "$BASH" -c "$BASH_EXECUTION_STRING" "$0" "$@"; fi',
+				'if [ -r "$BASH_ENV" ]; then . "$BASH_ENV"; fi',
 			);
 		}
 		fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
 		return { BASH_ENV: file };
 	}
-	// zsh ties some names to others (unsetting `path` empties PATH): leave its special parameters alone.
-	for (const name of placeholders) lines.push(`[[ \${(t)${name}} == *special* ]] || unset ${name} 2>/dev/null`);
+	// Only what still holds its placeholder (zsh keeps its own ZSH_VERSION, ...), and never a special
+	// parameter (zsh ties some names to others: unsetting `path` empties PATH).
+	for (const name of placeholders) {
+		lines.push(`[[ \${${name}-} != ${shellQuote(hardened[name]!)} || \${(t)${name}} == *special* ]] || unset ${name} 2>/dev/null`);
+	}
 	const zdotdir = path.join(dir, "zsh");
 	fs.mkdirSync(zdotdir, { recursive: true, mode: 0o700 });
 	lines.push(mine === undefined ? "unset ZDOTDIR" : `export ZDOTDIR=${shellQuote(mine)}`);
