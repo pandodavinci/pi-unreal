@@ -13,7 +13,7 @@
  * credentials and endpoints stay pinned.
  *
  * Unreal runs every command as `$SHELL -c <command>`. For bash and zsh, a startup file (shellHook) removes the
- * placeholders again before the command starts, so commands get your own environment, exactly as in your
+ * placeholders again before the command starts, so commands get your own environment, as in your
  * terminal, and a project's own tools can still load its .env themselves (dotenv and the like).
  *
  * The .env is parsed exactly like the runner's Go parser so the two can never disagree about a name.
