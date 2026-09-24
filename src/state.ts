@@ -34,8 +34,35 @@ async function removeOlderThan(dir: string, maxAgeMs: number, now: number): Prom
 	return removed;
 }
 
-/** Remove expired files under the state root. Never throws. Returns how many entries were removed. */
+/** Marks a directory as pi-unreal's own. Housekeeping deletes nothing from a directory without it. */
+const MARKER = ".pi-unreal";
+/** What pi-unreal keeps at the top of its state directory (also in versions that wrote no marker). */
+const OWN_ENTRY = /^(bin|jobs|chat|sessions|images|cancelled|cancelled\.json(\.\d+\.tmp)?|debug\.log(\.old)?)$/;
+
+/**
+ * Creates the state directory if needed and marks it as pi-unreal's. An existing directory that holds anything
+ * else (PI_UNREAL_STATE_DIR pointed at a project, say) is used but never marked, so it is never pruned.
+ * Returns whether the directory is pi-unreal's.
+ */
+export function claimStateRoot(root: string): boolean {
+	const marker = path.join(root, MARKER);
+	try {
+		if (fsSync.existsSync(marker)) return true;
+		fsSync.mkdirSync(root, { recursive: true, mode: 0o700 });
+		if (!fsSync.readdirSync(root).every(name => OWN_ENTRY.test(name))) return false;
+		fsSync.writeFileSync(marker, "pi-unreal state. Old files here are removed automatically.\n", { mode: 0o600 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Remove expired files under the state root, if it is pi-unreal's (see claimStateRoot). Never throws.
+ * Returns how many entries were removed.
+ */
 export async function pruneState(root: string, now = Date.now()): Promise<number> {
+	if (!fsSync.existsSync(path.join(root, MARKER))) return 0;
 	let removed = 0;
 	for (const dir of ["jobs", "chat"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.runs, now);
 	for (const dir of ["images"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.sessions, now);

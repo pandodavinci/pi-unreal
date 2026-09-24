@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promptTakenByFlag } from "../src/chat-mode";
 import piUnreal from "../src/index";
 import { addCancelled, readCancelled } from "../src/state";
 import { createFakeHost, fakeRunnerExecutable, waitFor } from "./fake-host";
@@ -255,6 +256,27 @@ describe("host modes", () => {
 		expect(host.sent.some(s => s.message.customType === "unreal-you")).toBe(true);
 	});
 
+	test("pi --unreal \"fix the tests\": the prompt Pi 0.87.1 reads as the flag's value still reaches Unreal, once", async () => {
+		process.argv = [...argv.slice(0, 2), "--unreal", "fix the tests"];
+		const host = await setup("echo", { flags: { unreal: true } });
+		await waitFor(() => answers(host).length === 1);
+		expect((answers(host)[0]!.message.details as { body: string }).body).toBe("ECHO:fix the tests");
+		// A Pi that parses the flag correctly delivers the prompt too: it is not run twice.
+		expect(await host.emit("input", { text: "fix the tests", source: "interactive" })).toEqual({ action: "handled", handled: true });
+		await Bun.sleep(300);
+		expect(answers(host).length).toBe(1);
+		// Typed later, the same text is a new message.
+		await host.emit("input", { text: "fix the tests", source: "interactive" });
+		await waitFor(() => answers(host).length === 2);
+	});
+
+	test("Oh My Pi reads --unreal as a switch, so nothing is recovered there", async () => {
+		process.argv = [...argv.slice(0, 2), "--unreal", "fix the tests"];
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		await Bun.sleep(300);
+		expect(host.sent.some(s => s.message.customType === "unreal-you")).toBe(false);
+	});
+
 	test("Pi's before_agent_start is left alone (its input hook already caught the prompt)", async () => {
 		const host = await setup("echo", { flags: { unreal: true } });
 		await host.emit("before_agent_start", { prompt: "anything" });
@@ -471,4 +493,15 @@ describe("review round 9 cases", () => {
 		fs.writeFileSync(path.join(root, "cancelled", "s1.json"), JSON.stringify(["legacy"]));
 		expect([...readCancelled(root)].sort()).toEqual(["legacy", "old"]);
 	});
+});
+
+test("promptTakenByFlag: only the argument right after --unreal, and only a message", () => {
+	expect(promptTakenByFlag(["--unreal", "fix the tests"])).toBe("fix the tests");
+	expect(promptTakenByFlag(["--model", "x", "--unreal", "hi"])).toBe("hi");
+	expect(promptTakenByFlag(["--unreal"])).toBeUndefined();
+	expect(promptTakenByFlag(["--unreal", "--model", "x"])).toBeUndefined();
+	expect(promptTakenByFlag(["--unreal", "@notes.md"])).toBeUndefined();
+	expect(promptTakenByFlag(["fix the tests", "--unreal"])).toBeUndefined();
+	expect(promptTakenByFlag(["--", "--unreal", "x"])).toBeUndefined();
+	expect(promptTakenByFlag(["--unreal", "  "])).toBeUndefined();
 });

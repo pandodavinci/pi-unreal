@@ -25,6 +25,8 @@ let modelRequests = 0;
 let modelBodies: string[] = [];
 let attacker: ReturnType<typeof Bun.serve>;
 let attackerAuth: (string | null)[] = [];
+/** The Bash command the fake model asks for. */
+let command = "echo $((6*7))";
 
 const sse = (response: object) =>
 	new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, {
@@ -45,7 +47,7 @@ beforeAll(async () => {
 					id: `resp-${modelRequests}`,
 					status: "completed",
 					output: [
-						{ id: "fc-1", type: "function_call", call_id: `call-${modelRequests}`, name: "Bash", arguments: '{"command":"echo $((6*7))"}', status: "completed" },
+						{ id: "fc-1", type: "function_call", call_id: `call-${modelRequests}`, name: "Bash", arguments: JSON.stringify({ command }), status: "completed" },
 					],
 				});
 			}
@@ -101,25 +103,33 @@ async function spawnUnprotected(workspace: string, env: Record<string, string | 
 	await child.exited;
 }
 
+const hasZsh = fs.existsSync("/bin/zsh");
+
 describe.skipIf(!live)("workspace .env attacks (unreal-agent#5), real runner", () => {
-	for (const vector of ["BASH_ENV", "SHELLOPTS+PS4"] as const) {
-		test(`shell code injection via ${vector}: runs unprotected, blocked by pi-unreal`, async () => {
+	const fakeModelEnv = (extra: Record<string, string> = {}) =>
+		cleanEnv({
+			UNREAL_HARNESS_LLM_PROVIDER: "openai",
+			UNREAL_HARNESS_LLM_MODEL: "fake",
+			UNREAL_HARNESS_LLM_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
+			OPENAI_API_KEY: CANARY,
+			...extra,
+		});
+
+	for (const vector of ["BASH_ENV", "SHELLOPTS+PS4", "ZDOTDIR"] as const) {
+		test.skipIf(vector === "ZDOTDIR" && !hasZsh)(`shell code injection via ${vector}: runs unprotected, blocked by pi-unreal`, async () => {
+			command = "echo $((6*7))";
 			const dir = tmpdir();
 			const marker = path.join(dir, "attacker-ran");
 			const evil = path.join(dir, "evil.sh");
 			fs.writeFileSync(evil, `touch "${marker}"\n`);
+			fs.writeFileSync(path.join(dir, ".zshenv"), `touch "${marker}"\n`);
 			const workspace = path.join(dir, "repo");
 			fs.mkdirSync(workspace);
 			fs.writeFileSync(
 				path.join(workspace, ".env"),
-				vector === "BASH_ENV" ? `BASH_ENV=${evil}\n` : `SHELLOPTS=xtrace\nPS4=$(touch ${marker})\n`,
+				vector === "BASH_ENV" ? `BASH_ENV=${evil}\n` : vector === "ZDOTDIR" ? `ZDOTDIR=${dir}\n` : `SHELLOPTS=xtrace\nPS4=$(touch ${marker})\n`,
 			);
-			const env = cleanEnv({
-				UNREAL_HARNESS_LLM_PROVIDER: "openai",
-				UNREAL_HARNESS_LLM_MODEL: "fake",
-				UNREAL_HARNESS_LLM_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
-				OPENAI_API_KEY: CANARY,
-			});
+			const env = fakeModelEnv(vector === "ZDOTDIR" ? { SHELL: "/bin/zsh", HOME: tmpdir() } : {});
 
 			await spawnUnprotected(workspace, env);
 			expect(fs.existsSync(marker)).toBe(true);
@@ -131,6 +141,33 @@ describe.skipIf(!live)("workspace .env attacks (unreal-agent#5), real runner", (
 			expect(fs.existsSync(marker)).toBe(false);
 			// The agent's own command still ran: its output (42, which is not in the command text) came back.
 			expect(toolOutputs(modelBodies).some(output => output.includes("42"))).toBe(true);
+		}, 60_000);
+	}
+
+	for (const shell of ["/bin/bash", "/bin/zsh", "/bin/sh"].filter(shell => fs.existsSync(shell))) {
+		test(`${path.basename(shell)}: commands keep your environment and a project's own tools can load its .env`, async () => {
+			const workspace = tmpdir();
+			fs.writeFileSync(path.join(workspace, ".env"), "DATABASE_URL=postgres://from-dotenv\nMINE=theirs\n");
+			// What a dotenv loader does: read .env, without overriding variables that are already set.
+			command = `printf '[%s][%s]' "\${DATABASE_URL-unset}" "\${MINE-unset}"; [ -z "\${DATABASE_URL+set}" ] && DATABASE_URL=$(sed -n 's/^DATABASE_URL=//p' .env); printf '[%s]' "$DATABASE_URL"`;
+			modelBodies = [];
+			const result = await runUnreal({
+				task: "hi",
+				cwd: workspace,
+				stateDir: tmpdir(),
+				command: [runner],
+				env: fakeModelEnv({ SHELL: shell, HOME: tmpdir(), MINE: "mine" }),
+			});
+			expect(result.status).toBe("completed");
+			const outputs = toolOutputs(modelBodies).join("\n");
+			if (shell === "/bin/sh") {
+				// No startup file to hook: the placeholder stays, and the result says so.
+				expect(outputs).toContain("[][mine][]");
+				expect(result.dotEnvEmpty).toEqual(["DATABASE_URL"]);
+			} else {
+				expect(outputs).toContain("[unset][mine][postgres://from-dotenv]");
+				expect(result.dotEnvEmpty).toEqual([]);
+			}
 		}, 60_000);
 	}
 

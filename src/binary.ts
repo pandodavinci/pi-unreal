@@ -1,7 +1,8 @@
 /**
  * Locates unreal-agent-runner, downloading the official release on first use.
  *
- * Order: UNREAL_AGENT_RUNNER → `unreal-agent-runner` on PATH → cached download → download.
+ * Order: UNREAL_AGENT_RUNNER → cached download → download. A runner on PATH is deliberately not used: the
+ * plugin speaks the protocol of the release it pins, and a stale install there would be picked up silently.
  * Downloads come from github.com/unreallabsai/unreal-agent releases and are verified against the
  * release's SHA256SUMS before they are made executable. The cache is keyed by version and platform, and
  * a cached binary is re-hashed on every resolve; anything that does not match is downloaded again.
@@ -12,39 +13,36 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-export const RUNNER_VERSION = "0.1.1";
+export const RUNNER_VERSION = "0.2.0";
 const RELEASES = "https://github.com/unreallabsai/unreal-agent/releases/download";
 const BINARY = "unreal-agent-runner";
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
-export function stateRoot(env: Record<string, string | undefined> = process.env): string {
-	return env.PI_UNREAL_STATE_DIR ?? path.join(os.homedir(), ".cache", "pi-unreal");
+export function defaultStateRoot(): string {
+	return path.join(os.homedir(), ".cache", "pi-unreal");
 }
+
+/** PI_UNREAL_STATE_DIR as an absolute path; unset or empty means the default. */
+export function stateRoot(env: Record<string, string | undefined> = process.env): string {
+	const configured = env.PI_UNREAL_STATE_DIR?.trim();
+	return configured ? path.resolve(configured) : defaultStateRoot();
+}
+
+export class UnsupportedPlatformError extends Error {}
 
 export function platformTag(platform = process.platform, arch = process.arch): string {
 	const goos = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : undefined;
 	const goarch = arch === "arm64" ? "arm64" : arch === "x64" ? "amd64" : undefined;
 	if (!goos || !goarch) {
-		throw new Error(`Unreal Agent publishes binaries for macOS and Linux (x64/arm64) only, not ${platform}/${arch}.`);
+		throw new UnsupportedPlatformError(
+			`Unreal Agent publishes runners for macOS and Linux (x64/arm64) only, and pi-unreal supports only those; this is ${platform}/${arch}.`,
+		);
 	}
 	return `${goos}_${goarch}`;
 }
 
 function sha256(file: string): string {
 	return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-}
-
-/** `which`, using Node APIs only (Pi runs extensions on Node). */
-export function which(name: string, envPath = process.env.PATH ?? ""): string | undefined {
-	for (const dir of envPath.split(path.delimiter)) {
-		if (!dir) continue;
-		const candidate = path.join(dir, name);
-		try {
-			fs.accessSync(candidate, fs.constants.X_OK);
-			if (fs.statSync(candidate).isFile()) return candidate;
-		} catch {}
-	}
-	return undefined;
 }
 
 /** Parses a `sha256sum` file ("<hex>  ./name" or "<hex>  name"). */
@@ -65,9 +63,9 @@ export async function resolveRunner(
 	fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
 	if (env.UNREAL_AGENT_RUNNER) return env.UNREAL_AGENT_RUNNER;
-	const onPath = which(BINARY, env.PATH ?? "");
-	if (onPath) return onPath;
-	const version = env.PI_UNREAL_RUNNER_VERSION ?? RUNNER_VERSION;
+	const version = env.PI_UNREAL_RUNNER_VERSION?.trim().replace(/^v/, "") || RUNNER_VERSION;
+	// It becomes part of a URL and a cache path.
+	if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`PI_UNREAL_RUNNER_VERSION is not a release version: ${version}`);
 	const target = path.join(stateRoot(env), "bin", version, platformTag(), BINARY);
 	if (cachedBinaryIsIntact(target)) return target;
 	let pending = inflight.get(target);

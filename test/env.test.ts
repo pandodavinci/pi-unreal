@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dotEnvNames, goTrimSpace, hardenEnvironment, inspectDotEnv, isUnpinnable, PINNED_ENV } from "../src/env";
-import { runUnreal } from "../src/runner";
+import { dotEnvNames, goTrimSpace, hardenEnvironment, inspectDotEnv, isUnpinnable, PINNED_ENV, shellHook, unpinnableReason } from "../src/env";
+import { formatSummary, runUnreal } from "../src/runner";
 
 const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-env-"));
 
@@ -47,7 +48,24 @@ describe("refusals", () => {
 		expect(isUnpinnable("BASH_FUNC_ls%%")).toBe(true);
 		expect(isUnpinnable("GIT_SSL_NO_VERIFY")).toBe(true); // disables TLS checks when merely present
 		expect(isUnpinnable("GIT_CONFIG_GLOBAL")).toBe(true);
+		expect(isUnpinnable("GIT_COMMIT_GRAPH_PARANOIA")).toBe(true);
 		expect(isUnpinnable("PS4")).toBe(false);
+	});
+
+	test("build metadata under GIT_ names that git never reads is neutralized like any other name", () => {
+		for (const name of ["GIT_SHA", "GIT_COMMIT_SHA", "GIT_BRANCH", "GIT_TAG"]) expect(isUnpinnable(name)).toBe(false);
+	});
+
+	test("each refusal says why", async () => {
+		expect(unpinnableReason("GIT_SSL_NO_VERIFY")).toContain("git");
+		expect(unpinnableReason("SANDBOX_EGRESS_PROXY")).toContain("proxy");
+		const dir = tmpdir();
+		fs.writeFileSync(path.join(dir, ".env"), "GIT_DIR=/elsewhere\nGIT_SHA=abc123\n");
+		const result = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"] });
+		expect(result.status).toBe("failed");
+		expect(result.errorMessage).toContain("GIT_DIR (git acts on GIT_ settings even when they are empty)");
+		expect(result.errorMessage).not.toContain("GIT_SHA");
+		expect(formatSummary("t", result)).not.toContain("Log:"); // nothing ran, so there is no log to point at
 	});
 
 	test("inspectDotEnv reports names and refusals", () => {
@@ -79,5 +97,75 @@ describe("refusals", () => {
 		fs.writeFileSync(path.join(dir, ".env"), "BASH_FUNC_x%%=() { :; }\n");
 		const result = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"], env: { PI_UNREAL_TRUST_DOTENV: "1" } });
 		expect(result.errorMessage).toContain("failed to spawn"); // got past the refusal
+	});
+});
+
+const shells = ["/bin/bash", "/bin/zsh"].filter(shell => fs.existsSync(shell));
+
+describe("shellHook: Unreal's commands get your own environment back", () => {
+	/** Runs `command` the way the runner does ($SHELL -c), with pi-unreal's hardened environment. */
+	const runCommand = (original: Record<string, string | undefined>, neutralize: string[], command: string) => {
+		const hardened = hardenEnvironment(original, neutralize);
+		const hook = shellHook(original, hardened, path.join(tmpdir(), "shell"));
+		expect(hook).toBeDefined();
+		const shell = original.SHELL!;
+		const result = spawnSync(shell, ["-c", command], { env: { ...hardened, ...hook } as NodeJS.ProcessEnv, encoding: "utf8" });
+		expect(result.stderr).toBe("");
+		return result.stdout;
+	};
+	const home = () => {
+		const dir = tmpdir();
+		return { HOME: dir, PATH: process.env.PATH };
+	};
+
+	for (const shell of shells) {
+		test(`${path.basename(shell)}: placeholders are gone and your own values stay, so a project's tools can load its .env`, () => {
+			const out = runCommand(
+				{ ...home(), SHELL: shell, MINE: "mine" },
+				["DATABASE_URL", "MINE", "GIT_SHA", "ZDOTDIR", "BASH_ENV", "PS4", "SHELLOPTS"],
+				'printf "%s|" "${DATABASE_URL-unset}" "${MINE-unset}" "${GIT_SHA-unset}" "${OPENAI_API_KEY-unset}" "${BASH_ENV-unset}" "${ZDOTDIR-unset}" "${PS4-unset}"',
+			);
+			expect(out).toBe("unset|mine|unset|unset|unset|unset|unset|");
+		});
+
+		test(`${path.basename(shell)}: nested shells start normally`, () => {
+			const out = runCommand({ ...home(), SHELL: shell }, ["DATABASE_URL"], `${shell} -c 'printf "%s|%s" "\${BASH_ENV-unset}" "\${ZDOTDIR-unset}"'`);
+			expect(out).toBe("unset|unset");
+		});
+	}
+
+	test("bash: your own BASH_ENV still runs, and stays set", () => {
+		const dir = tmpdir();
+		const mine = path.join(dir, "my env's file");
+		fs.writeFileSync(mine, "export FROM_MY_STARTUP=yes\n");
+		const out = runCommand({ ...home(), SHELL: "/bin/bash", BASH_ENV: mine }, ["DATABASE_URL"], 'printf "%s|%s" "${FROM_MY_STARTUP-no}" "$BASH_ENV"');
+		expect(out).toBe(`yes|${mine}`);
+	});
+
+	test.skipIf(!shells.includes("/bin/zsh"))("zsh: your own .zshenv still runs, from ZDOTDIR or HOME", () => {
+		const env = home();
+		fs.writeFileSync(path.join(env.HOME, ".zshenv"), "export FROM_MY_STARTUP=home\n");
+		expect(runCommand({ ...env, SHELL: "/bin/zsh" }, ["DATABASE_URL"], 'printf "%s|%s" "${FROM_MY_STARTUP-no}" "${ZDOTDIR-unset}"')).toBe("home|unset");
+		const zdotdir = tmpdir();
+		fs.writeFileSync(path.join(zdotdir, ".zshenv"), "export FROM_MY_STARTUP=zdotdir\n");
+		expect(runCommand({ ...env, SHELL: "/bin/zsh", ZDOTDIR: zdotdir }, ["DATABASE_URL"], 'printf "%s|%s" "${FROM_MY_STARTUP-no}" "$ZDOTDIR"')).toBe(
+			`zdotdir|${zdotdir}`,
+		);
+	});
+
+	test("other shells keep the empty placeholders, and the run says so", async () => {
+		expect(shellHook({ SHELL: "/bin/sh" }, hardenEnvironment({ SHELL: "/bin/sh" }, ["FOO"]), tmpdir())).toBeUndefined();
+		const dir = tmpdir();
+		fs.writeFileSync(path.join(dir, ".env"), "FOO=1\nMINE=theirs\n");
+		const result = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"], env: { SHELL: "/bin/sh", MINE: "mine" } });
+		expect(result.dotEnvEmpty).toEqual(["FOO"]);
+		expect(formatSummary("t", result)).toContain(".env variables as empty (1;");
+		const hooked = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"], env: { SHELL: "/bin/bash" } });
+		expect(hooked.dotEnvEmpty).toEqual([]);
+	});
+
+	test("a trusted .env that sets the startup variable is left alone", () => {
+		const original = { SHELL: "/bin/bash" };
+		expect(shellHook(original, hardenEnvironment(original), tmpdir(), ["BASH_ENV"])).toBeUndefined();
 	});
 });

@@ -8,9 +8,13 @@
  * LD_PRELOAD, ...). See https://github.com/unreallabsai/unreal-agent/issues/5.
  *
  * Default: every name the .env defines is made present before spawn (your own value if you have one,
- * otherwise an empty string), so the runner ignores the whole file. Names that an empty value cannot
+ * otherwise an empty placeholder), so the runner ignores the whole file. Names that an empty value cannot
  * neutralize are refused. PI_UNREAL_TRUST_DOTENV=1 lets a trusted repo's .env through, while runner
  * credentials and endpoints stay pinned.
+ *
+ * Unreal runs every command as `$SHELL -c <command>`. For bash and zsh, a startup file (shellHook) removes the
+ * placeholders again before the command starts, so commands get your own environment, exactly as in your
+ * terminal, and a project's own tools can still load its .env themselves (dotenv and the like).
  *
  * The .env is parsed exactly like the runner's Go parser so the two can never disagree about a name.
  */
@@ -43,13 +47,39 @@ export const PINNED_ENV = [
 ] as const;
 
 /**
- * Names that must not come from an untrusted .env and cannot be neutralized with an empty value:
- * the runner applies SANDBOX_EGRESS_PROXY even when it is already set; an empty BASH_FUNC_* entry is still a
- * (broken) function definition for Bash to import; and for git, set-but-empty often differs from unset
- * (GIT_SSL_NO_VERIFY disables certificate checks when merely present, GIT_CONFIG_GLOBAL="" is a file named "").
+ * Build metadata that CI and deploy setups commonly keep in a .env under a GIT_ name. Git itself reads none
+ * of them (checked against git's documentation and the names in the git binary), so an empty value is safe.
  */
+const GIT_METADATA = new Set([
+	"GIT_BRANCH",
+	"GIT_COMMIT",
+	"GIT_COMMIT_HASH",
+	"GIT_COMMIT_SHA",
+	"GIT_HASH",
+	"GIT_REPO_URL",
+	"GIT_REPOSITORY_URL",
+	"GIT_REVISION",
+	"GIT_SHA",
+	"GIT_TAG",
+	"GIT_VERSION",
+]);
+
+/**
+ * Why a name must not come from an untrusted .env even though it cannot be neutralized with an empty value,
+ * or undefined when an empty value is safe. The runner applies SANDBOX_EGRESS_PROXY even when it is already
+ * set; an empty BASH_FUNC_* entry is still a (broken) function definition for Bash to import; and for git,
+ * set-but-empty often differs from unset (GIT_SSL_NO_VERIFY disables certificate checks when merely present,
+ * GIT_CONFIG_GLOBAL="" is a file named "").
+ */
+export function unpinnableReason(name: string): string | undefined {
+	if (name === "SANDBOX_EGRESS_PROXY") return "Unreal Agent would send all its traffic through that proxy";
+	if (name.startsWith("BASH_FUNC_")) return "it defines a shell function for every command";
+	if (name.startsWith("GIT_") && !GIT_METADATA.has(name)) return "git acts on GIT_ settings even when they are empty";
+	return undefined;
+}
+
 export function isUnpinnable(name: string): boolean {
-	return name === "SANDBOX_EGRESS_PROXY" || name.startsWith("BASH_FUNC_") || name.startsWith("GIT_");
+	return unpinnableReason(name) !== undefined;
 }
 
 /** Go's unicode.IsSpace, which strings.TrimSpace uses. JavaScript's \s differs (U+0085, U+FEFF). */
@@ -114,4 +144,49 @@ export function hardenEnvironment(
 /** zsh reads ZDOTDIR="" as "/"; unset means $HOME. Everything else is neutralized with an empty value. */
 function neutralValue(name: string, env: Record<string, string | undefined>): string {
 	return name === "ZDOTDIR" ? (env.HOME ?? "") : "";
+}
+
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * A startup file that removes the placeholders hardenEnvironment added, for commands run by bash or zsh.
+ * `original` is the environment before hardening, `hardened` the one the runner gets. The file restores the
+ * startup variable it hijacks (BASH_ENV or ZDOTDIR) and runs your own startup file, so every command sees the
+ * environment it would see in your terminal. Nested shells are unaffected. Returns the variables to add to
+ * the runner's environment, or undefined for other shells (which keep the empty placeholders) and when
+ * `leave` (a trusted .env's names) includes the startup variable.
+ */
+export function shellHook(
+	original: Record<string, string | undefined>,
+	hardened: Record<string, string | undefined>,
+	dir: string,
+	leave: readonly string[] = [],
+): Record<string, string> | undefined {
+	const shell = path.basename(hardened.SHELL?.trim() ?? "");
+	const hookVar = shell === "bash" ? "BASH_ENV" : shell === "zsh" ? "ZDOTDIR" : undefined;
+	if (!hookVar || leave.includes(hookVar)) return undefined;
+	const placeholders = Object.keys(hardened).filter(
+		name => original[name] === undefined && hardened[name] !== undefined && name !== hookVar && IDENTIFIER.test(name),
+	);
+	if (placeholders.length === 0 && hardened[hookVar] === original[hookVar]) return undefined;
+	const mine = original[hookVar];
+	const lines = ["# pi-unreal: give this command your own environment back (see pi-unreal src/env.ts)."];
+	for (const name of placeholders) lines.push(`unset ${shell === "bash" ? "-v " : ""}${name} 2>/dev/null`);
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	if (hookVar === "BASH_ENV") {
+		const file = path.join(dir, "bash_env");
+		// Bash expands BASH_ENV (including command substitution) before reading it.
+		if (/[$`\\]/.test(file)) return undefined;
+		lines.push(mine === undefined ? "unset -v BASH_ENV" : `export BASH_ENV=${shellQuote(mine)}`);
+		lines.push('if [ -n "${BASH_ENV-}" ] && [ -r "$BASH_ENV" ]; then . "$BASH_ENV"; fi');
+		fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
+		return { BASH_ENV: file };
+	}
+	const zdotdir = path.join(dir, "zsh");
+	fs.mkdirSync(zdotdir, { recursive: true, mode: 0o700 });
+	lines.push(mine === undefined ? "unset ZDOTDIR" : `export ZDOTDIR=${shellQuote(mine)}`);
+	lines.push('if [[ -r "${ZDOTDIR:-$HOME}/.zshenv" ]]; then source "${ZDOTDIR:-$HOME}/.zshenv"; fi');
+	fs.writeFileSync(path.join(zdotdir, ".zshenv"), `${lines.join("\n")}\n`, { mode: 0o600 });
+	return { ZDOTDIR: zdotdir };
 }

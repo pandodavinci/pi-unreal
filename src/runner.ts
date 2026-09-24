@@ -8,10 +8,11 @@
  * we have observed (snapshotted periodically, since orphans lose their parent link once the runner dies).
  */
 import { type ChildProcessByStdio, execFile, execFileSync, spawn } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Readable } from "node:stream";
-import { resolveRunner } from "./binary";
-import { hardenEnvironment, inspectDotEnv, isUnpinnable } from "./env";
+import { resolveRunner, UnsupportedPlatformError } from "./binary";
+import { hardenEnvironment, inspectDotEnv, isUnpinnable, shellHook, unpinnableReason } from "./env";
 import { type BridgeEvent, EventMapper, type RunStats } from "./events";
 
 export interface UnrealRunOptions {
@@ -68,6 +69,19 @@ export interface UnrealRunResult {
 	logDir: string;
 	/** Descendant process groups/pids the bridge had to kill during cleanup. */
 	killedDescendants: number;
+	/**
+	 * Variables of the project's .env that Unreal's commands saw as empty. Only with a shell other than bash
+	 * or zsh: for those, commands get your own environment back (see env.ts shellHook).
+	 */
+	dotEnvEmpty?: string[];
+}
+
+/** Provider and model a run uses: the Codex login and gpt-6-astra unless configured otherwise. */
+export function runnerModel(env: Record<string, string | undefined> = process.env): { provider: string; model: string } {
+	const provider = env.UNREAL_HARNESS_LLM_PROVIDER || "openai-codex";
+	// The runner's openai-codex provider has no default model.
+	const model = env.UNREAL_HARNESS_LLM_MODEL || (provider === "openai-codex" ? "gpt-6-astra" : "");
+	return { provider, model };
 }
 
 const STDERR_TAIL = 64 * 1024;
@@ -153,7 +167,16 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	const debug = opts.debugLog ?? (() => {});
 	const logDir = path.join(opts.stateDir, "logs");
 	const mapper = new EventMapper();
-	const base = { signalCode: null, stopReason: "", promptPersisted: false, finalText: "", stats: mapper.stats, stderr: "", logDir, killedDescendants: 0 };
+	const base: Omit<UnrealRunResult, "status" | "exitCode" | "durationMs"> = {
+		signalCode: null,
+		stopReason: "",
+		promptPersisted: false,
+		finalText: "",
+		stats: mapper.stats,
+		stderr: "",
+		logDir,
+		killedDescendants: 0,
+	};
 
 	if (opts.signal?.aborted || opts.forceSignal?.aborted) {
 		return { ...base, status: "cancelled", exitCode: null, durationMs: 0 };
@@ -173,7 +196,11 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		status: "failed" as const,
 		exitCode: null,
 		durationMs: performance.now() - started,
-		errorMessage: `Refusing to run: ${path.join(opts.cwd, ".env")} sets ${refused.join(", ")}, which pi-unreal cannot neutralize (Unreal Agent would reroute its traffic or inject shell code). Remove it${trustDotEnv ? "" : ", or set PI_UNREAL_TRUST_DOTENV=1 if you trust this repository"}.`,
+		errorMessage: `Refusing to run: ${path.join(opts.cwd, ".env")} sets ${refused
+			.map(name => `${name} (${unpinnableReason(name)})`)
+			.join(", ")}, which pi-unreal cannot keep away from Unreal Agent. Remove or rename ${refused.length > 1 ? "them" : "it"}${
+			trustDotEnv ? "" : ", or set PI_UNREAL_TRUST_DOTENV=1 if you trust this repository"
+		}.`,
 	});
 	const early = readDotEnv();
 	if (early.refused.length) {
@@ -219,19 +246,33 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			status: "crashed",
 			exitCode: null,
 			durationMs: performance.now() - started,
-			errorMessage: `Could not get the Unreal Agent runner: ${err instanceof Error ? err.message : String(err)}\nCheck your connection to github.com, or install unreal-agent-runner yourself and set UNREAL_AGENT_RUNNER.`,
+			errorMessage:
+				err instanceof UnsupportedPlatformError
+					? err.message
+					: `Could not get the Unreal Agent runner: ${err instanceof Error ? err.message : String(err)}\nCheck your connection to github.com, or install unreal-agent-runner yourself and set UNREAL_AGENT_RUNNER.`,
 		};
 	}
-	// Default to the Codex login (~/.codex/auth.json). The runner's openai-codex provider has no default model.
-	const configured: Record<string, string | undefined> = { ...baseEnv };
-	if (!configured.UNREAL_HARNESS_LLM_PROVIDER) configured.UNREAL_HARNESS_LLM_PROVIDER = "openai-codex";
-	if (configured.UNREAL_HARNESS_LLM_PROVIDER === "openai-codex" && !configured.UNREAL_HARNESS_LLM_MODEL) {
-		configured.UNREAL_HARNESS_LLM_MODEL = "gpt-6-astra";
-	}
+	// Default to the Codex login (~/.codex/auth.json).
+	const { provider, model } = runnerModel(baseEnv);
+	const configured: Record<string, string | undefined> = { ...baseEnv, UNREAL_HARNESS_LLM_PROVIDER: provider };
+	if (model) configured.UNREAL_HARNESS_LLM_MODEL = model;
 	// Make the workspace .env inert: runner settings are pinned, and (unless trusted) every name it defines.
 	const dotEnv = readDotEnv();
 	if (dotEnv.refused.length) return refusal(dotEnv.refused);
 	const env = hardenEnvironment(configured, trustDotEnv ? [] : dotEnv.report.names);
+	// Then give Unreal's commands your own environment back (bash and zsh), unless a trusted .env sets the
+	// startup variable the hook needs.
+	let hooked = false;
+	try {
+		const hook = shellHook(configured, env, path.join(opts.stateDir, "shell"), trustDotEnv ? dotEnv.report.names : []);
+		if (hook) {
+			Object.assign(env, hook);
+			hooked = true;
+		}
+	} catch (err) {
+		debug(`shell hook not installed, commands keep the empty placeholders: ${String(err)}`);
+	}
+	base.dotEnvEmpty = hooked || trustDotEnv ? [] : dotEnv.report.names.filter(name => configured[name] === undefined);
 	debug(`spawn ${JSON.stringify(argv)} provider=${env.UNREAL_HARNESS_LLM_PROVIDER} model=${env.UNREAL_HARNESS_LLM_MODEL}`);
 
 	// Node APIs only: Pi runs extensions on Node, Oh My Pi on the Bun runtime.
@@ -451,6 +492,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		errorMessage,
 		logDir,
 		killedDescendants,
+		dotEnvEmpty: base.dotEnvEmpty,
 	};
 }
 
@@ -482,7 +524,12 @@ export function formatSummary(task: string, result: UnrealRunResult): string {
 		);
 	}
 	if (result.errorMessage) lines.push(`Error: ${result.errorMessage}`);
-	lines.push(`Log: ${result.logDir}`);
+	if (result.dotEnvEmpty?.length) {
+		lines.push(
+			`Note: Unreal's commands saw this project's .env variables as empty (${result.dotEnvEmpty.length}; only bash and zsh get them back). PI_UNREAL_TRUST_DOTENV=1 lets a trusted project's .env through.`,
+		);
+	}
+	if (result.logDir && fs.existsSync(result.logDir)) lines.push(`Log: ${result.logDir}`);
 	if (result.finalText) lines.push("", result.finalText);
 	return lines.join("\n");
 }

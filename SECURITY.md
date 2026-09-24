@@ -13,7 +13,7 @@ Every shell command the agent runs inherits the result. A repository you open wi
 
 ## What pi-unreal does
 
-By default the project's `.env` never reaches Unreal:
+By default the project's `.env` never reaches Unreal Agent:
 
 1. pi-unreal parses the `.env` with the same rules as the runner's Go parser (including Go's definition of
    whitespace), so both always agree on which variable names it defines.
@@ -22,19 +22,31 @@ By default the project's `.env` never reaches Unreal:
    skips variables that are already set, so it ignores the file's values.
 3. Names that an empty value cannot neutralize cause a refusal before anything runs:
    `SANDBOX_EGRESS_PROXY` (the runner applies it even when already set), `BASH_FUNC_*` (an empty value is still
-   a function definition for Bash) and every `GIT_*` variable (for git, set-but-empty often differs from unset:
-   `GIT_SSL_NO_VERIFY` disables certificate checks when merely present).
+   a function definition for Bash) and `GIT_*` variables (for git, set-but-empty often differs from unset:
+   `GIT_SSL_NO_VERIFY` disables certificate checks when merely present). Build metadata that git never reads
+   (`GIT_SHA`, `GIT_COMMIT_SHA`, `GIT_BRANCH`, `GIT_TAG` and a few more) is neutralized like any other name.
 4. The runner's own credentials and endpoints (`UNREAL_HARNESS_LLM_*`, provider API keys, Codex auth, proxy and
    TLS settings) are pinned in every mode, and `SANDBOX_EGRESS_PROXY` is refused in every mode.
 
-Side effect: tools the agent runs will not see the project's `.env` values either; a tool that loads the `.env`
-itself sees them as already set (to empty). For a repository you trust, `PI_UNREAL_TRUST_DOTENV=1` lets the
-`.env` through; step 4 still applies.
+5. The runner starts each command as `$SHELL -c <command>`. For bash and zsh, pi-unreal points `BASH_ENV` or
+   `ZDOTDIR` at a startup file it writes for the run. That file removes the placeholders from steps 2 and 4,
+   restores `BASH_ENV`/`ZDOTDIR` and runs your own startup file, so each command starts with exactly your
+   environment, as in your terminal. A project's own tools can then load its `.env` themselves (dotenv and the
+   like), which they would do in your terminal too; plain commands such as `git status` never see its values.
+
+With another shell (`sh`, `fish`, ...) there is no startup file to use, so commands keep the empty
+placeholders: the `.env` values look empty to them, and a tool that loads the `.env` itself sees them as
+already set. The run's result says so. For a repository you trust, `PI_UNREAL_TRUST_DOTENV=1` lets the `.env`
+through; step 4 still applies.
 
 Limits:
 
-- An empty value equals unset for almost every program, but not all. A variable whose mere presence changes a
-  tool's behavior, and that is not in the refusal list, still reaches the agent's commands as an empty value.
+- An empty value equals unset for almost every program, but not all. With bash and zsh this only concerns the
+  runner itself, since the placeholders are gone before a command starts. With other shells, a variable whose
+  mere presence changes a tool's behavior, and that is not in the refusal list, reaches commands as an empty
+  value.
+- If a system-wide zsh file (`/etc/zshenv`) sets `ZDOTDIR` itself, the startup file does not run and commands
+  keep the placeholders (as with other shells).
 - pi-unreal and the runner read the `.env` separately, a moment apart. A process that rewrites the file in that
   instant is outside this protection.
 
@@ -48,7 +60,11 @@ command:
 | `.env` sets `UNREAL_HARNESS_LLM_BASE_URL` to an attacker | attacker receives `Bearer <your key>` | attacker receives nothing |
 | `.env` sets `BASH_ENV` | attacker code runs | no attacker code runs; the agent's command still runs |
 | `.env` sets `SHELLOPTS=xtrace`, `PS4=$(...)` | attacker code runs | no attacker code runs; the agent's command still runs |
+| `.env` sets `ZDOTDIR` (zsh) | attacker code runs | no attacker code runs; the agent's command still runs |
 | `.env` defines `BASH_FUNC_*` | | refused before start |
+
+The same tests check that, with bash and zsh, the agent's commands start with your own environment and can
+load the project's `.env` themselves.
 
 ## What it does not cover
 
@@ -56,8 +72,10 @@ Unreal Agent is a coding agent: it runs shell commands in your project with your
 repository can still try to influence it through its files (prompt injection). Only point it at code you
 would be willing to run yourself.
 
-Files pi-unreal writes (pasted images, debug log, downloaded runner) live under `~/.cache/pi-unreal` with
-private permissions; directories and the debug log from older versions are tightened on use.
+Files pi-unreal writes (pasted images, debug log, downloaded runner, the startup files above) live under
+`~/.cache/pi-unreal` (or `PI_UNREAL_STATE_DIR`) with private permissions; directories and the debug log from
+older versions are tightened on use. Old files are removed automatically, but only from a directory pi-unreal
+created, never from one that already held other files.
 
 ## Runner download
 

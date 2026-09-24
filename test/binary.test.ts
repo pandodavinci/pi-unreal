@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseSums, platformTag, resolveRunner, RUNNER_VERSION } from "../src/binary";
+import { parseSums, platformTag, resolveRunner, RUNNER_VERSION, UnsupportedPlatformError } from "../src/binary";
 
 const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-bin-"));
 
@@ -42,7 +42,29 @@ describe("binary", () => {
 	test("platformTag maps to Go release names and rejects unsupported platforms", () => {
 		expect(platformTag("darwin", "arm64")).toBe("darwin_arm64");
 		expect(platformTag("linux", "x64")).toBe("linux_amd64");
+		expect(() => platformTag("win32", "x64")).toThrow(UnsupportedPlatformError);
 		expect(() => platformTag("win32", "x64")).toThrow("macOS and Linux");
+	});
+
+	test("a runner on PATH is not used: the pinned, verified release is", async () => {
+		const bin = tmpdir();
+		fs.writeFileSync(path.join(bin, "unreal-agent-runner"), "#!/bin/sh\necho stale\n", { mode: 0o755 });
+		const state = tmpdir();
+		const { fetchImpl, requested } = fakeRelease();
+		expect(await resolveRunner({ PI_UNREAL_STATE_DIR: state, PATH: bin }, undefined, fetchImpl)).toBe(
+			path.join(state, "bin", RUNNER_VERSION, platformTag(), "unreal-agent-runner"),
+		);
+		expect(requested.length).toBeGreaterThan(0);
+	});
+
+	test("PI_UNREAL_RUNNER_VERSION must be a release version (it ends up in a URL and a path)", async () => {
+		const { fetchImpl, requested } = fakeRelease();
+		for (const version of ["../../etc", "latest", "1.2"]) {
+			await expect(resolveRunner({ PI_UNREAL_STATE_DIR: tmpdir(), PI_UNREAL_RUNNER_VERSION: version }, undefined, fetchImpl)).rejects.toThrow(
+				"not a release version",
+			);
+		}
+		expect(requested).toEqual([]);
 	});
 
 	test("UNREAL_AGENT_RUNNER wins without any download", async () => {

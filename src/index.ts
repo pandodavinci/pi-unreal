@@ -8,7 +8,8 @@
  *   unreal_delegate tool    lets the host's model hand a task to Unreal (foreground or background)
  *
  * Env: UNREAL_HARNESS_LLM_PROVIDER / UNREAL_HARNESS_LLM_MODEL (default openai-codex / gpt-6-astra),
- *      UNREAL_AGENT_RUNNER, PI_UNREAL_STATE_DIR, PI_UNREAL_THINKING, PI_UNREAL_MODE=1, PI_UNREAL_DEBUG=1.
+ *      UNREAL_AGENT_RUNNER, PI_UNREAL_RUNNER_VERSION, PI_UNREAL_STATE_DIR, PI_UNREAL_THINKING, PI_UNREAL_MODE=1,
+ *      PI_UNREAL_TRUST_DOTENV=1, PI_UNREAL_DEBUG=1.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -16,7 +17,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { stateRoot as resolveStateRoot } from "./binary";
 import { registerChatMode } from "./chat-mode";
-import { pruneState } from "./state";
+import { claimStateRoot, pruneState } from "./state";
 import { type BridgeEvent, describe, emptyStats } from "./events";
 import { hostMode, idleMessagesReachClient, safeTimers, tell, wakeModelDelivery, SHUTDOWN_FORCE_WAIT_MS, SHUTDOWN_GRACE_MS, withDeadline } from "./host";
 import { formatSummary, runUnreal, type UnrealRunResult } from "./runner";
@@ -229,8 +230,12 @@ export default function piUnreal(pi: ExtensionAPI) {
 		liveCtx = ctx;
 		if (!pruned) {
 			pruned = true;
-			// In the background: never delays startup.
-			void pruneState(stateRoot).then(removed => removed && debug("state", `pruned ${removed} expired entries`));
+			if (claimStateRoot(stateRoot)) {
+				// In the background: never delays startup.
+				void pruneState(stateRoot).then(removed => removed && debug("state", `pruned ${removed} expired entries`));
+			} else {
+				debug("state", `${stateRoot} holds files pi-unreal did not create: automatic cleanup is off there`);
+			}
 		}
 	});
 	pi.on("agent_end", async (_event, ctx) => {

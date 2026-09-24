@@ -25,16 +25,16 @@
 
 - **Unreal as the harness.** Start Pi with `--unreal` and every message you type goes to Unreal Agent instead of Pi's model. `/harness pi` hands the chat back to Pi, and Unreal is caught up on what it missed when you switch again.
 - **Unreal as a background worker.** `/unreal fix the failing tests` runs in the background while you keep chatting. Progress shows above the editor, the result lands in the chat.
-- **One plugin, two hosts.** The same package installs into [Pi](https://github.com/badlogic/pi-mono) and [Oh My Pi](https://github.com/can1357/oh-my-pi).
+- **One plugin, two hosts.** The same package installs into [Pi](https://github.com/earendil-works/pi) and [Oh My Pi](https://github.com/can1357/oh-my-pi).
 - **Real cancellation.** Esc stops Unreal and the commands it started, including ones that ignore Ctrl-C (see [Limitations](#limitations) for the edge case).
-- **Safer in other people's repos.** Unreal loads a project's `.env`, which lets a repo steal your API key or run code in every shell command ([unreal-agent#5](https://github.com/unreallabsai/unreal-agent/issues/5)). pi-unreal neutralizes the `.env`, and tests run these attacks against the real runner.
+- **Safer in other people's repos.** Unreal loads a project's `.env`, which lets a repo steal your API key or run code in every shell command ([unreal-agent#5](https://github.com/unreallabsai/unreal-agent/issues/5)). pi-unreal keeps the `.env` away from Unreal while the project's own tools can still read it, and tests run these attacks against the real runner.
 - **Zero setup for Unreal itself.** The official runner is downloaded on first use and checked against its published SHA-256.
 
 ## Install
 
 **Prerequisites**
 
-- [Pi](https://github.com/badlogic/pi-mono) or [Oh My Pi](https://github.com/can1357/oh-my-pi)
+- [Pi](https://github.com/earendil-works/pi) or [Oh My Pi](https://github.com/can1357/oh-my-pi)
 - macOS or Linux (x64 or arm64). Unreal publishes no Windows runner.
 - Model access for Unreal. The default is your Codex login (`codex login`, stored in `~/.codex/auth.json`). API keys work too, see [Configuration](#configuration).
 
@@ -85,13 +85,13 @@ Pi stays interactive. `/unreal-jobs` shows progress, `/unreal-cancel` stops the 
 | Type while it works | Messages queue and run in order. Esc stops the current one and drops the queue. |
 | `/harness pi`, `/harness unreal` | Switch who answers, in the same chat. Refused while the other side is still working. |
 
-Slash commands and `!bash` always go to Pi. A prompt on the command line goes to Unreal too: with released Pi 0.87.1, put it before the flag (`pi "fix the tests" --unreal`), since Pi's parser otherwise reads it as the flag's value. In Oh My Pi this works for a quoted message (also after `@file` context when the message has more than one word) and needs Oh My Pi's own model login; a prompt made only of `@file` or piped input stays with Oh My Pi. Type those in the chat instead.
+Slash commands and `!bash` always go to Pi. A prompt on the command line goes to Unreal too (`pi --unreal "fix the tests"`). In Oh My Pi this works for a quoted message (also after `@file` context when the message has more than one word) and needs Oh My Pi's own model login; a prompt made only of `@file` or piped input stays with Oh My Pi. Type those in the chat instead.
 
 | Mode | `--unreal` | `/unreal`, `unreal_delegate` |
 | --- | --- | --- |
 | Interactive terminal (Pi, Oh My Pi) | yes | yes |
 | Pi RPC | yes | yes |
-| Oh My Pi RPC and ACP | off, with a warning (fix pending upstream: [oh-my-pi#11834](https://github.com/can1357/oh-my-pi/pull/11834)) | yes; results also go to stderr, and in RPC to a notification ([oh-my-pi#12718](https://github.com/can1357/oh-my-pi/pull/12718)) |
+| Oh My Pi RPC and ACP | off, with a warning (fix pending upstream: [oh-my-pi#13027](https://github.com/can1357/oh-my-pi/pull/13027)) | yes; results also go to stderr, and in RPC to a notification ([oh-my-pi#12718](https://github.com/can1357/oh-my-pi/pull/12718)) |
 | Print (`-p`) and JSON | off, with a warning on stderr | `/unreal` waits and prints the result; the tool always runs in the foreground |
 
 In print mode, run `/unreal` in a fresh session (`--no-session`): when resuming a chat the host also prints its own last answer afterwards. When the job fails, Pi exits with code 1; Oh My Pi's print mode still exits 0 unless the host itself failed.
@@ -122,26 +122,28 @@ In `--unreal` mode the messages you type are handled before they reach Pi's agen
 | `UNREAL_HARNESS_LLM_PROVIDER` | `openai-codex` | `openai`, `openai-codex`, `openrouter`, `fireworks`, `ollama` |
 | `UNREAL_HARNESS_LLM_MODEL` | `gpt-6-astra` with openai-codex | Model ID |
 | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY` | | Key for the chosen provider |
-| `UNREAL_AGENT_RUNNER` | downloaded release | Use your own `unreal-agent-runner` build |
+| `UNREAL_AGENT_RUNNER` | downloaded release | Use your own `unreal-agent-runner` build. A runner on your `PATH` is not used. |
+| `PI_UNREAL_RUNNER_VERSION` | `0.2.0` | Download another Unreal release (verified the same way) |
 | `PI_UNREAL_MODE=1` | off | Same as `--unreal` |
 | `PI_UNREAL_THINKING` | runner default (`high`) | `low`, `medium`, `high`, `xhigh`, `max` |
-| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images. Run logs and job output are removed after 14 days; Unreal sessions, their command output and pasted images after 60 days without use. |
+| `PI_UNREAL_STATE_DIR` | `~/.cache/pi-unreal` | Runner download, sessions, logs, pasted images. Run logs and job output are removed after 14 days; Unreal sessions, their command output and pasted images after 60 days without use. Only in a directory pi-unreal created. |
 | `PI_UNREAL_TRUST_DOTENV=1` | off | Let a trusted project's `.env` reach Unreal (model credentials, endpoints and proxies stay pinned) |
 | `PI_UNREAL_DEBUG=1` | off | Write every runner event to `<state>/debug.log` (private file) |
 
-Set these in your shell, not in a project's `.env`: by default pi-unreal neutralizes every variable a project's `.env` defines.
+Set these in your shell, not in a project's `.env`: Unreal Agent never reads a project's `.env` ([details](SECURITY.md)). The commands it runs start with your own environment, so a project's own tools still load their `.env`, as in your terminal.
 
 > [!NOTE]
-> **Streaming.** Released Unreal runners (v0.1.1) accept `include_partial_messages` but ignore it, so each reply appears when it is complete while the step list updates live. pi-unreal already requests streaming and shows replies word by word with any runner that implements it. An implementation is proposed upstream in [unreal-agent#10](https://github.com/unreallabsai/unreal-agent/issues/10); to try it now, build [that branch](https://github.com/pandodavinci/unreal-agent/tree/partial-messages) and set `UNREAL_AGENT_RUNNER`.
+> **Streaming.** Released Unreal runners (v0.2.0) accept `include_partial_messages` but ignore it, so each reply appears when it is complete while the step list updates live. pi-unreal already requests streaming and shows replies word by word with any runner that implements it. An implementation is proposed upstream in [unreal-agent#10](https://github.com/unreallabsai/unreal-agent/issues/10); to try it now, build [that branch](https://github.com/pandodavinci/unreal-agent/tree/partial-messages) and set `UNREAL_AGENT_RUNNER`.
 
 > [!WARNING]
-> Unreal Agent runs shell commands in your project with your permissions, like any coding agent. pi-unreal neutralizes a repo's `.env`, but a malicious repo can still try to steer the agent through its files. Details in [SECURITY.md](SECURITY.md).
+> Unreal Agent runs shell commands in your project with your permissions, like any coding agent. pi-unreal keeps a repo's `.env` away from Unreal, but a malicious repo can still try to steer the agent through its files. Details in [SECURITY.md](SECURITY.md).
 
 ### Limitations
 
 - Unreal uses its own tools (Bash, ViewImage, skills in `.harness/skills`). Pi's tools, skills and MCP servers are not available to it.
 - Commands are tracked by polling Unreal's process tree 4 times a second. A command started and orphaned by Unreal in the instant before it exits (on a crash, or while stopping) can survive cleanup.
 - Stopped and dropped messages are remembered (the newest 20,000) so they are never replayed to Unreal, also in forks.
+- With a shell other than bash or zsh, Unreal's commands see a project's `.env` variables as empty (the result says so). A `.env` that sets git's own `GIT_` settings is refused; rename them or set `PI_UNREAL_TRUST_DOTENV=1` for a repo you trust.
 - Tested by hand on Pi 0.87.1 and Oh My Pi 18.2.8 to 18.2.11 (macOS arm64). CI runs the test suite on macOS and Linux, loads the plugin on Node, and drives the real `pi` and `omp` binaries end to end.
 
 ## Contributing

@@ -34,7 +34,7 @@ import {
 import { inspectDotEnv } from "./env";
 import { describe } from "./events";
 import { chatModeSupported, handledInput, hostMode, isOhMyPi, safeTimers, warn, SHUTDOWN_FORCE_WAIT_MS, SHUTDOWN_GRACE_MS, withDeadline } from "./host";
-import { runUnreal } from "./runner";
+import { runnerModel, runUnreal } from "./runner";
 import { addCancelled, imagesDir, readCancelled, readOwnership, touchChat, writeOwnership } from "./state";
 
 const WIDGET_KEY = "unreal-chat";
@@ -89,10 +89,24 @@ export function commandLinePromptArg(prompt: string, args: readonly string[], ta
 		);
 }
 
+/**
+ * The prompt Pi dropped from `pi --unreal "fix the tests"`: Pi 0.87.1 parses extension flags before any
+ * extension has registered them, so it reads the argument after an unknown flag as that flag's value.
+ * Oh My Pi knows its extensions' flags when it parses, so this applies to Pi only.
+ */
+export function promptTakenByFlag(args: readonly string[]): string | undefined {
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] === "--") return undefined;
+		if (args[i] !== "--unreal") continue;
+		const next = args[i + 1];
+		return next !== undefined && next.trim() && !next.startsWith("-") && !next.startsWith("@") ? next.trim() : undefined;
+	}
+	return undefined;
+}
+
 export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: string) => void): { isUnrealMode(): boolean } {
 	const stateRoot = resolveStateRoot();
-	const provider = process.env.UNREAL_HARNESS_LLM_PROVIDER ?? "openai-codex";
-	const model = process.env.UNREAL_HARNESS_LLM_MODEL ?? (process.env.UNREAL_HARNESS_LLM_PROVIDER ? "" : "gpt-6-astra");
+	const { provider, model } = runnerModel();
 
 	pi.registerFlag("unreal", { description: "Send every message to Unreal Agent (pi-unreal)", type: "boolean", default: false });
 	let enabled = process.env.PI_UNREAL_MODE === "1";
@@ -108,6 +122,8 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	/** Command-line arguments already taken over as prompts. */
 	const takenOverArgs = new Set<string>();
 	let pendingHandoff: { cancelled: boolean } | undefined;
+	/** A prompt recovered from `pi --unreal "<prompt>"`, until the first input (a later Pi may deliver it too). */
+	let recoveredPrompt: string | undefined;
 	/** The turn being processed, from the moment the pump takes it (so Esc and shutdown can always reach it). */
 	let active:
 		| {
@@ -270,14 +286,12 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 
 	const processTurn = async (ctx: ExtensionContext, turn: Turn, current: NonNullable<typeof active>) => {
 		const { controller, force, steps, startedAt } = current;
-		if (!dotEnvNoticeShown.has(ctx.cwd)) {
+		if (process.env.PI_UNREAL_TRUST_DOTENV === "1" && !dotEnvNoticeShown.has(ctx.cwd)) {
 			dotEnvNoticeShown.add(ctx.cwd);
 			const dotEnv = inspectDotEnv(ctx.cwd);
 			if (dotEnv.exists && dotEnv.names.length > 0) {
 				ctx.ui.notify(
-					process.env.PI_UNREAL_TRUST_DOTENV === "1"
-						? `This folder has a .env (${dotEnv.names.length} vars). PI_UNREAL_TRUST_DOTENV=1: Unreal Agent will load it; model credentials and endpoints stay pinned.`
-						: `This folder has a .env (${dotEnv.names.length} vars). pi-unreal neutralizes it for Unreal Agent. Set PI_UNREAL_TRUST_DOTENV=1 if you trust this repo.`,
+					`This folder has a .env (${dotEnv.names.length} vars). PI_UNREAL_TRUST_DOTENV=1: Unreal Agent will load it; model credentials and endpoints stay pinned.`,
 					"info",
 				);
 			}
@@ -365,6 +379,13 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		showProgress();
 		const result = await done;
 		showProgress();
+		if (result.dotEnvEmpty?.length && !dotEnvNoticeShown.has(ctx.cwd)) {
+			dotEnvNoticeShown.add(ctx.cwd);
+			ctx.ui.notify(
+				`Unreal's commands see this folder's .env variables as empty (${result.dotEnvEmpty.length}): pi-unreal gives them back only for bash and zsh. Set PI_UNREAL_TRUST_DOTENV=1 if you trust this repo.`,
+				"info",
+			);
+		}
 
 		// A turn that never reached Unreal's session leaves it where it was.
 		recordOwner(result.promptPersisted ? { hostSession, headTurn: turn.id } : previousOwner);
@@ -490,6 +511,11 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				enabled = false;
 				warn(ctx, UNSUPPORTED_MODE);
 			}
+			const swallowed = enabled && !isOhMyPi(pi) && hostMode(ctx) === "tui" ? promptTakenByFlag(process.argv.slice(2)) : undefined;
+			if (swallowed) {
+				recoveredPrompt = swallowed;
+				void route(ctx, swallowed, undefined);
+			}
 		}
 		if (!unsubscribeKeys && ctx.hasUI) {
 			// Re-registered after every session change: Oh My Pi drops terminal listeners on /new and /resume.
@@ -526,7 +552,12 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 
 	pi.on("input", async (event, ctx) => {
 		bind(ctx);
-		if (event.source !== "extension") sawTypedInput = true;
+		if (event.source !== "extension") {
+			sawTypedInput = true;
+			const duplicate = recoveredPrompt !== undefined && event.text.trim() === recoveredPrompt;
+			recoveredPrompt = undefined;
+			if (duplicate) return handledInput();
+		}
 		if (!enabled || event.source === "extension") return undefined;
 		const text = event.text.trim();
 		if ((!text && !event.images?.length) || text.startsWith("/") || text.startsWith("!")) return undefined;

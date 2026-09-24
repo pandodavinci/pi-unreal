@@ -79,7 +79,7 @@ export function hostMode(ctx: unknown): HostMode {
 
 /**
  * Where --unreal can take over typed messages. Pi runs extension input hooks for every prompt, so its TUI and
- * RPC modes work. Oh My Pi runs them only in its TUI (fix pending: can1357/oh-my-pi#11834). Print and JSON modes exit
+ * RPC modes work. Oh My Pi runs them only in its TUI (fix pending: can1357/oh-my-pi#13027). Print and JSON modes exit
  * after one prompt, before an Unreal turn could finish.
  */
 export function chatModeSupported(pi: ExtensionAPI, mode: HostMode): boolean {
