@@ -577,6 +577,12 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const arg = commandLinePromptArg(text, process.argv.slice(2), takenOverArgs);
 		if (arg === undefined) return undefined;
 		takenOverArgs.add(arg);
+		if (text.startsWith("/") || text.startsWith("!")) {
+			// Oh My Pi would send it to its model as plain text; commands only run when typed in the chat.
+			ctx.abort();
+			warn(ctx, `"${text}" on the command line is not run as a command. Type it in the chat instead.`);
+			return undefined;
+		}
 		const hostSession = ctx.sessionManager.getSessionId();
 		const leaf = ctx.sessionManager.getLeafId();
 		ctx.abort();

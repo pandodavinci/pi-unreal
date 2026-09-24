@@ -276,6 +276,18 @@ describe("host modes", () => {
 		}
 	});
 
+	test("Oh My Pi: a command given on the command line is stopped, not sent to Unreal or to the host's model", async () => {
+		for (const command of ["/exit", "!ls"]) {
+			process.argv = [...argv, command];
+			const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+			await host.emit("before_agent_start", { prompt: command });
+			expect(host.state.aborts).toBe(1);
+			await Bun.sleep(200);
+			expect(host.sent.some(s => s.message.customType === "unreal-you")).toBe(false);
+			expect(host.notifications.some(n => n.includes("Type it in the chat"))).toBe(true);
+		}
+	});
+
 	test("Oh My Pi reads --unreal as a switch, so nothing is recovered there", async () => {
 		process.argv = [...argv.slice(0, 2), "--unreal", "fix the tests"];
 		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
