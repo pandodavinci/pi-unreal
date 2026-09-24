@@ -290,6 +290,15 @@ describe("host modes", () => {
 		}
 	});
 
+	test("Oh My Pi: a command after @file context is stopped too (the argument decides, not the prompt start)", async () => {
+		process.argv = [...argv, "@context.txt", "/unreal check status"];
+		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+		await host.emit("before_agent_start", { prompt: '<file name="context.txt">notes</file>\n/unreal check status' });
+		expect(host.state.aborts).toBe(1);
+		await waitFor(() => host.notifications.some(n => n.includes('"/unreal check status" on the command line')));
+		expect(host.sent.some(s => s.message.customType === "unreal-you")).toBe(false);
+	});
+
 	test("Oh My Pi reads --unreal as a switch, so nothing is recovered there", async () => {
 		process.argv = [...argv.slice(0, 2), "--unreal", "fix the tests"];
 		const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });

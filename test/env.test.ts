@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dotEnvNames, goTrimSpace, hardenEnvironment, inspectDotEnv, isUnpinnable, PINNED_ENV, shellHook, unpinnableReason, zshHonorsZdotdir } from "../src/env";
+import { dotEnvNames, goTrimSpace, hardenEnvironment, inspectDotEnv, isUnpinnable, PINNED_ENV, shellHook, unpinnableReason, zshHonorsZdotdir, zshHonorsZdotdirAsync } from "../src/env";
 import { formatSummary, runUnreal } from "../src/runner";
 
 const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-env-"));
@@ -66,6 +66,10 @@ describe("refusals", () => {
 			const result = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"] });
 			expect(result.errorMessage).not.toContain("PI_UNREAL_TRUST_DOTENV");
 		}
+	});
+
+	test("__proto__ is refused: Bun, Oh My Pi's runtime, drops it from a spawned process's environment", () => {
+		expect(isUnpinnable("__proto__")).toBe(true);
 	});
 
 	test("names that exist on every JavaScript object (constructor, __proto__) are neutralized like any other", () => {
@@ -219,6 +223,7 @@ describe("shellHook: Unreal's commands get your own environment back", () => {
 
 	test.skipIf(!shells.includes("/bin/zsh"))("zsh: the probe asks zsh itself (this machine's system zshenv keeps ZDOTDIR)", () => {
 		expect(zshHonorsZdotdir("/bin/zsh", { PATH: process.env.PATH, HOME: tmpdir() })).toBe(true);
+		return zshHonorsZdotdirAsync("/bin/zsh", { PATH: process.env.PATH, HOME: tmpdir() }).then(honored => expect(honored).toBe(true));
 	});
 
 	test("bash: a BASH_ENV of yours built with command substitution still runs", () => {

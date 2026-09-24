@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Readable } from "node:stream";
 import { resolveRunner, RunnerSetupError } from "./binary";
-import { hardenEnvironment, inspectDotEnv, isUnpinnable, own, shellHook, unpinnableReason } from "./env";
+import { hardenEnvironment, inspectDotEnv, isUnpinnable, own, shellHook, unpinnableReason, zshHonorsZdotdirAsync } from "./env";
 import { type BridgeEvent, EventMapper, type RunStats } from "./events";
 
 export interface UnrealRunOptions {
@@ -257,6 +257,10 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	const { provider, model } = runnerModel(baseEnv);
 	const configured: Record<string, string | undefined> = { ...baseEnv, UNREAL_HARNESS_LLM_PROVIDER: provider };
 	if (model) configured.UNREAL_HARNESS_LLM_MODEL = model;
+	// Whether zsh would run the startup hook below (asked before the .env is read, to keep that read last).
+	const shellPath = configured.SHELL?.trim() ?? "";
+	const zdotdirHonored = path.basename(shellPath) === "zsh" ? await zshHonorsZdotdirAsync(shellPath, configured) : true;
+	if (aborted()) return cancelledBeforeStart();
 	// Make the workspace .env inert: runner settings are pinned, and (unless trusted) every name it defines.
 	const dotEnv = readDotEnv();
 	if (dotEnv.refused.length) return refusal(dotEnv.refused);
@@ -265,7 +269,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	// startup variable the hook needs.
 	let hooked = false;
 	try {
-		const hook = shellHook(configured, env, path.join(opts.stateDir, "shell"), trustDotEnv ? dotEnv.report.names : []);
+		const hook = shellHook(configured, env, path.join(opts.stateDir, "shell"), trustDotEnv ? dotEnv.report.names : [], () => zdotdirHonored);
 		if (hook) {
 			Object.assign(env, hook);
 			hooked = true;

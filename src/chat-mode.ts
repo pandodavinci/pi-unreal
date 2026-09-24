@@ -577,14 +577,14 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const arg = commandLinePromptArg(text, process.argv.slice(2), takenOverArgs);
 		if (arg === undefined) return undefined;
 		takenOverArgs.add(arg);
-		if (text.startsWith("/") || text.startsWith("!")) {
+		if (arg.startsWith("/") || arg.startsWith("!")) {
 			// Oh My Pi would send it to its model as plain text; commands only run when typed in the chat.
 			// Once the aborted turn settles (a warning shown earlier is not drawn), take the prompt it restores
 			// out of the editor, so the next message is not appended to it.
 			ctx.abort();
 			void untilIdle(ctx).then(() => {
 				if (ctx.hasUI && ctx.ui.getEditorText?.().trim() === text) ctx.ui.setEditorText?.("");
-				warn(ctx, `"${text}" on the command line is not run as a command. Type it in the chat instead.`);
+				warn(ctx, `"${arg}" on the command line is not run as a command. Type it in the chat instead.`);
 			});
 			return undefined;
 		}

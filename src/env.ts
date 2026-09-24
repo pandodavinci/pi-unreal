@@ -18,7 +18,7 @@
  *
  * The .env is parsed exactly like the runner's Go parser so the two can never disagree about a name.
  */
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -157,6 +157,8 @@ const SHELL_INTERNAL = new Set([
 export function unpinnableReason(name: string): string | undefined {
 	if (name === "SANDBOX_EGRESS_PROXY") return "Unreal Agent would send all its traffic through that proxy";
 	if (name.startsWith("BASH_FUNC_")) return "it defines a shell function for every command";
+	// Bun (Oh My Pi's runtime) drops an environment entry with this name when it spawns a process.
+	if (name === "__proto__") return "it cannot be held in the environment pi-unreal passes to Unreal Agent";
 	if (SHELL_INTERNAL.has(name)) return "it is one of the shell's own variables, which an empty value breaks";
 	if (name.startsWith("GIT_") && !GIT_METADATA.has(name)) return "git acts on GIT_ settings even when they are empty";
 	return undefined;
@@ -242,14 +244,25 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * ZDOTDIR it was given after its system zshenv, which runs first. The probe directory does not exist, so zsh
  * reads nothing else. A zsh that does not answer within 2 seconds counts as no.
  */
+const ZDOTDIR_PROBE = path.join(path.sep, "nonexistent", "pi-unreal-zdotdir-probe");
+const ZDOTDIR_PROBE_ARGS = ["-c", 'print -rn -- "${ZDOTDIR-}"'];
+
 export function zshHonorsZdotdir(shell: string, env: Record<string, string | undefined>): boolean {
-	const probe = path.join(path.sep, "nonexistent", "pi-unreal-zdotdir-probe");
-	const result = spawnSync(shell, ["-c", 'print -rn -- "${ZDOTDIR-}"'], {
-		env: { ...env, ZDOTDIR: probe } as NodeJS.ProcessEnv,
+	const result = spawnSync(shell, ZDOTDIR_PROBE_ARGS, {
+		env: { ...env, ZDOTDIR: ZDOTDIR_PROBE } as NodeJS.ProcessEnv,
 		encoding: "utf8",
 		timeout: 2_000,
 	});
-	return result.status === 0 && result.stdout === probe;
+	return result.status === 0 && result.stdout === ZDOTDIR_PROBE;
+}
+
+/** zshHonorsZdotdir without blocking (the plugin runs on the host's UI thread). */
+export function zshHonorsZdotdirAsync(shell: string, env: Record<string, string | undefined>): Promise<boolean> {
+	return new Promise(resolve => {
+		execFile(shell, ZDOTDIR_PROBE_ARGS, { env: { ...env, ZDOTDIR: ZDOTDIR_PROBE } as NodeJS.ProcessEnv, encoding: "utf8", timeout: 2_000 }, (err, out) =>
+			resolve(!err && out === ZDOTDIR_PROBE),
+		);
+	});
 }
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 /**
@@ -316,7 +329,8 @@ export function shellHook(
 			lines.push("unset -v BASH_ENV");
 		} else {
 			// Your own BASH_ENV, which bash expands before reading it: rather than imitate that, run the command
-			// in a fresh bash (same process) that reads it itself, from this clean environment.
+			// in a fresh bash (same process) that reads it itself, from this clean environment. (Bash 3.2 has not
+			// set $0 and the arguments yet at this point; the runner passes none.)
 			lines.push(
 				`export BASH_ENV=${shellQuote(mine)}`,
 				'if [ -n "${BASH_EXECUTION_STRING-}" ]; then exec "$BASH" -c "$BASH_EXECUTION_STRING" "$0" "$@"; fi',
