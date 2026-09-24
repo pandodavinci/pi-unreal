@@ -123,9 +123,11 @@ describe("shellHook: Unreal's commands get your own environment back", () => {
 			const out = runCommand(
 				{ ...home(), SHELL: shell, MINE: "mine" },
 				["DATABASE_URL", "MINE", "GIT_SHA", "ZDOTDIR", "BASH_ENV", "PS4", "SHELLOPTS"],
-				'printf "%s|" "${DATABASE_URL-unset}" "${MINE-unset}" "${GIT_SHA-unset}" "${OPENAI_API_KEY-unset}" "${BASH_ENV-unset}" "${ZDOTDIR-unset}" "${PS4-unset}"',
+				'printf "%s|" "${DATABASE_URL-unset}" "${MINE-unset}" "${GIT_SHA-unset}" "${OPENAI_API_KEY-unset}" "${BASH_ENV-unset}" "${ZDOTDIR-unset}"',
 			);
-			expect(out).toBe("unset|mine|unset|unset|unset|unset|unset|");
+			// PS4 and SHELLOPTS are shell variables: bash unsets PS4 (SHELLOPTS is read-only), zsh keeps its special
+			// PS4 empty. Either way the command starts normally, which the empty stderr above checks.
+			expect(out).toBe("unset|mine|unset|unset|unset|unset|");
 		});
 
 		test(`${path.basename(shell)}: nested shells start normally`, () => {
@@ -133,6 +135,27 @@ describe("shellHook: Unreal's commands get your own environment back", () => {
 			expect(out).toBe("unset|unset");
 		});
 	}
+
+	test("bash: its special variables are left alone (RANDOM keeps working)", () => {
+		const out = runCommand({ ...home(), SHELL: "/bin/bash" }, ["RANDOM", "DATABASE_URL"], 'a=$RANDOM; b=$RANDOM; [ "$a" != "$b" ] && echo random-ok');
+		expect(out).toBe("random-ok\n");
+	});
+
+	test("bash: your own BASH_ENV is expanded the way bash expands it", () => {
+		const dir = tmpdir();
+		fs.writeFileSync(path.join(dir, "startup"), "export FROM_MY_STARTUP=yes\n");
+		const out = runCommand(
+			{ ...home(), SHELL: "/bin/bash", STARTUP_DIR: dir, BASH_ENV: "$STARTUP_DIR/startup" },
+			["DATABASE_URL"],
+			'printf "%s|%s" "${FROM_MY_STARTUP-no}" "$BASH_ENV"',
+		);
+		expect(out).toBe("yes|$STARTUP_DIR/startup");
+	});
+
+	test.skipIf(!shells.includes("/bin/zsh"))("zsh: a .env name zsh ties to another (path is PATH) is left alone", () => {
+		const out = runCommand({ ...home(), SHELL: "/bin/zsh" }, ["path", "fpath", "DATABASE_URL"], 'uname -s >/dev/null && printf "%s" "${DATABASE_URL-unset}"');
+		expect(out).toBe("unset");
+	});
 
 	test("bash: your own BASH_ENV still runs, and stays set", () => {
 		const dir = tmpdir();

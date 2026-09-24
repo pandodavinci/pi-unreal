@@ -148,6 +148,26 @@ function neutralValue(name: string, env: Record<string, string | undefined>): st
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+/** Bash variables that lose their special meaning when unset (bash(1), "Shell Variables"). Left alone. */
+const BASH_SPECIAL = new Set([
+	"BASH_ALIASES",
+	"BASH_ARGV0",
+	"BASH_CMDS",
+	"BASH_COMMAND",
+	"BASH_SUBSHELL",
+	"BASHPID",
+	"COMP_WORDBREAKS",
+	"DIRSTACK",
+	"EPOCHREALTIME",
+	"EPOCHSECONDS",
+	"FUNCNAME",
+	"GROUPS",
+	"HISTCMD",
+	"LINENO",
+	"RANDOM",
+	"SECONDS",
+	"SRANDOM",
+]);
 
 /**
  * A startup file that removes the placeholders hardenEnvironment added, for commands run by bash or zsh.
@@ -172,17 +192,26 @@ export function shellHook(
 	if (placeholders.length === 0 && hardened[hookVar] === original[hookVar]) return undefined;
 	const mine = original[hookVar];
 	const lines = ["# pi-unreal: give this command your own environment back (see pi-unreal src/env.ts)."];
-	for (const name of placeholders) lines.push(`unset ${shell === "bash" ? "-v " : ""}${name} 2>/dev/null`);
 	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 	if (hookVar === "BASH_ENV") {
 		const file = path.join(dir, "bash_env");
 		// Bash expands BASH_ENV (including command substitution) before reading it.
 		if (/[$`\\]/.test(file)) return undefined;
+		for (const name of placeholders) if (!BASH_SPECIAL.has(name)) lines.push(`unset -v ${name} 2>/dev/null`);
 		lines.push(mine === undefined ? "unset -v BASH_ENV" : `export BASH_ENV=${shellQuote(mine)}`);
-		lines.push('if [ -n "${BASH_ENV-}" ] && [ -r "$BASH_ENV" ]; then . "$BASH_ENV"; fi');
+		// Your own BASH_ENV, expanded the way bash expands it (parameters, command substitution, arithmetic).
+		lines.push(
+			'if [ -n "${BASH_ENV-}" ]; then',
+			'  case $BASH_ENV in *[\\$\\`]*) eval "__pi_unreal_startup=\\"$BASH_ENV\\"" ;; *) __pi_unreal_startup=$BASH_ENV ;; esac',
+			'  if [ -r "$__pi_unreal_startup" ]; then . "$__pi_unreal_startup"; fi',
+			"  unset -v __pi_unreal_startup",
+			"fi",
+		);
 		fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
 		return { BASH_ENV: file };
 	}
+	// zsh ties some names to others (unsetting `path` empties PATH): leave its special parameters alone.
+	for (const name of placeholders) lines.push(`[[ \${(t)${name}} == *special* ]] || unset ${name} 2>/dev/null`);
 	const zdotdir = path.join(dir, "zsh");
 	fs.mkdirSync(zdotdir, { recursive: true, mode: 0o700 });
 	lines.push(mine === undefined ? "unset ZDOTDIR" : `export ZDOTDIR=${shellQuote(mine)}`);

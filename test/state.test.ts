@@ -36,8 +36,8 @@ test("runs expire after 14 days; sessions and what belongs to them after 60 days
 	const liveOps = dir("sessions/operations/pi-b", 20 * day);
 	fs.writeFileSync(path.join(root, "debug.log"), Buffer.alloc(RETENTION.debugLogBytes + 1));
 
-	// A directory laid out by an earlier version (no marker yet) is recognized as pi-unreal's.
-	expect(claimStateRoot(root)).toBe(true);
+	// The default directory, as an earlier version left it (no marker yet), is pi-unreal's.
+	expect(claimStateRoot(root, true)).toBe(true);
 	await pruneState(root);
 	for (const gone of [oldRun, oldImage, expiredSession, expiredOwner, expiredOps]) expect({ gone, exists: fs.existsSync(gone) }).toEqual({ gone, exists: false });
 	for (const kept of [newRun, keptImage, liveSession, liveOwner, liveOps]) expect({ kept, exists: fs.existsSync(kept) }).toEqual({ kept, exists: true });
@@ -59,16 +59,29 @@ test("a directory holding anything else is never pruned (PI_UNREAL_STATE_DIR poi
 		fs.utimesSync(target, old, old);
 		fs.utimesSync(path.dirname(target), old, old);
 	}
-	expect(claimStateRoot(project)).toBe(false);
+	expect(claimStateRoot(project, false)).toBe(false);
 	expect(await pruneState(project)).toBe(0);
 	for (const rel of files) expect({ rel, exists: fs.existsSync(path.join(project, rel)) }).toEqual({ rel, exists: true });
 });
 
 test("a new or empty state directory is claimed, so it is pruned", () => {
 	const fresh = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-fresh-")), "state");
-	expect(claimStateRoot(fresh)).toBe(true);
-	expect(claimStateRoot(fresh)).toBe(true);
-	expect(claimStateRoot(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-empty-")))).toBe(true);
+	expect(claimStateRoot(fresh, false)).toBe(true);
+	fs.mkdirSync(path.join(fresh, "jobs"));
+	expect(claimStateRoot(fresh, false)).toBe(true); // marked: stays pi-unreal's
+	expect(claimStateRoot(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-empty-")), false)).toBe(true);
+});
+
+test("an existing directory that merely has pi-unreal-like folder names is not claimed", async () => {
+	const photos = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-photos-"));
+	fs.mkdirSync(path.join(photos, "images"));
+	const photo = path.join(photos, "images", "family.jpg");
+	fs.writeFileSync(photo, "jpeg");
+	const old = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+	fs.utimesSync(photo, old, old);
+	expect(claimStateRoot(photos, false)).toBe(false);
+	expect(await pruneState(photos)).toBe(0);
+	expect(fs.existsSync(photo)).toBe(true);
 });
 
 test("PI_UNREAL_STATE_DIR: empty means the default, relative paths become absolute", () => {

@@ -104,6 +104,9 @@ export function promptTakenByFlag(args: readonly string[]): string | undefined {
 	return undefined;
 }
 
+/** How long after startup the same prompt arriving from the host counts as the host delivering it too. */
+const RECOVERED_PROMPT_DEDUPE_MS = 5_000;
+
 export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: string) => void): { isUnrealMode(): boolean } {
 	const stateRoot = resolveStateRoot();
 	const { provider, model } = runnerModel();
@@ -122,8 +125,8 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	/** Command-line arguments already taken over as prompts. */
 	const takenOverArgs = new Set<string>();
 	let pendingHandoff: { cancelled: boolean } | undefined;
-	/** A prompt recovered from `pi --unreal "<prompt>"`, until the first input (a later Pi may deliver it too). */
-	let recoveredPrompt: string | undefined;
+	/** A prompt recovered from `pi --unreal "<prompt>"`, briefly: a later Pi may deliver it at startup too. */
+	let recoveredPrompt: { text: string; until: number } | undefined;
 	/** The turn being processed, from the moment the pump takes it (so Esc and shutdown can always reach it). */
 	let active:
 		| {
@@ -512,8 +515,11 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				warn(ctx, UNSUPPORTED_MODE);
 			}
 			const swallowed = enabled && !isOhMyPi(pi) && hostMode(ctx) === "tui" ? promptTakenByFlag(process.argv.slice(2)) : undefined;
-			if (swallowed) {
-				recoveredPrompt = swallowed;
+			if (swallowed && (swallowed.startsWith("/") || swallowed.startsWith("!"))) {
+				// A command is Pi's to run, and Pi has already dropped it.
+				warn(ctx, `Pi read "${swallowed}" as the value of --unreal and dropped it. Put it before the flag: pi "${swallowed}" --unreal`);
+			} else if (swallowed) {
+				recoveredPrompt = { text: swallowed, until: Date.now() + RECOVERED_PROMPT_DEDUPE_MS };
 				void route(ctx, swallowed, undefined);
 			}
 		}
@@ -554,7 +560,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		bind(ctx);
 		if (event.source !== "extension") {
 			sawTypedInput = true;
-			const duplicate = recoveredPrompt !== undefined && event.text.trim() === recoveredPrompt;
+			const duplicate = recoveredPrompt !== undefined && Date.now() < recoveredPrompt.until && event.text.trim() === recoveredPrompt.text;
 			recoveredPrompt = undefined;
 			if (duplicate) return handledInput();
 		}

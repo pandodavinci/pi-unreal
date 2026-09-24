@@ -36,20 +36,19 @@ async function removeOlderThan(dir: string, maxAgeMs: number, now: number): Prom
 
 /** Marks a directory as pi-unreal's own. Housekeeping deletes nothing from a directory without it. */
 const MARKER = ".pi-unreal";
-/** What pi-unreal keeps at the top of its state directory (also in versions that wrote no marker). */
-const OWN_ENTRY = /^(bin|jobs|chat|sessions|images|cancelled|cancelled\.json(\.\d+\.tmp)?|debug\.log(\.old)?)$/;
 
 /**
- * Creates the state directory if needed and marks it as pi-unreal's. An existing directory that holds anything
- * else (PI_UNREAL_STATE_DIR pointed at a project, say) is used but never marked, so it is never pruned.
+ * Creates the state directory if needed and marks it as pi-unreal's: only a new or empty directory, or the
+ * default one (~/.cache/pi-unreal, which earlier versions used without a marker). Any other existing directory
+ * (PI_UNREAL_STATE_DIR pointed at a project, say) is used but never marked, so nothing in it is ever pruned.
  * Returns whether the directory is pi-unreal's.
  */
-export function claimStateRoot(root: string): boolean {
+export function claimStateRoot(root: string, isDefault: boolean): boolean {
 	const marker = path.join(root, MARKER);
 	try {
 		if (fsSync.existsSync(marker)) return true;
 		fsSync.mkdirSync(root, { recursive: true, mode: 0o700 });
-		if (!fsSync.readdirSync(root).every(name => OWN_ENTRY.test(name))) return false;
+		if (!isDefault && fsSync.readdirSync(root).length > 0) return false;
 		fsSync.writeFileSync(marker, "pi-unreal state. Old files here are removed automatically.\n", { mode: 0o600 });
 		return true;
 	} catch {

@@ -116,7 +116,9 @@ describe.skipIf(!live)("workspace .env attacks (unreal-agent#5), real runner", (
 		});
 
 	for (const vector of ["BASH_ENV", "SHELLOPTS+PS4", "ZDOTDIR"] as const) {
-		test.skipIf(vector === "ZDOTDIR" && !hasZsh)(`shell code injection via ${vector}: runs unprotected, blocked by pi-unreal`, async () => {
+		// As root, bash ignores PS4 from the environment, so the unprotected control cannot succeed there.
+		const skip = (vector === "ZDOTDIR" && !hasZsh) || (vector === "SHELLOPTS+PS4" && process.getuid?.() === 0);
+		test.skipIf(skip)(`shell code injection via ${vector}: runs unprotected, blocked by pi-unreal`, async () => {
 			command = "echo $((6*7))";
 			const dir = tmpdir();
 			const marker = path.join(dir, "attacker-ran");

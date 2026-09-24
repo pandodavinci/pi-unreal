@@ -29,9 +29,10 @@ By default the project's `.env` never reaches Unreal Agent:
    TLS settings) are pinned in every mode, and `SANDBOX_EGRESS_PROXY` is refused in every mode.
 
 5. The runner starts each command as `$SHELL -c <command>`. For bash and zsh, pi-unreal points `BASH_ENV` or
-   `ZDOTDIR` at a startup file it writes for the run. That file removes the placeholders from steps 2 and 4,
-   restores `BASH_ENV`/`ZDOTDIR` and runs your own startup file, so each command starts with exactly your
-   environment, as in your terminal. A project's own tools can then load its `.env` themselves (dotenv and the
+   `ZDOTDIR` at a startup file it writes for the run. That file removes the placeholders from steps 2 and 4
+   (except the shell's own special variables, such as zsh's `path`, which is tied to `PATH`), restores
+   `BASH_ENV`/`ZDOTDIR` and runs your own startup file, so each command starts with your own environment, as in
+   your terminal. A project's own tools can then load its `.env` themselves (dotenv and the
    like), which they would do in your terminal too; plain commands such as `git status` never see its values.
 
 With another shell (`sh`, `fish`, ...) there is no startup file to use, so commands keep the empty

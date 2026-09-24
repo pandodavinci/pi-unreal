@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { stateRoot as resolveStateRoot } from "./binary";
+import { defaultStateRoot, stateRoot as resolveStateRoot } from "./binary";
 import { registerChatMode } from "./chat-mode";
 import { claimStateRoot, pruneState } from "./state";
 import { type BridgeEvent, describe, emptyStats } from "./events";
@@ -45,6 +45,8 @@ const MAX_FINISHED_JOBS = 50;
 
 export default function piUnreal(pi: ExtensionAPI) {
 	const stateRoot = resolveStateRoot();
+	// Before anything is written there: only a directory pi-unreal created (or its default one) is ever pruned.
+	const ownsStateRoot = claimStateRoot(stateRoot, stateRoot === defaultStateRoot());
 	const debugEnabled = process.env.PI_UNREAL_DEBUG === "1";
 	const debugFile = path.join(stateRoot, "debug.log");
 	const jobs = new Map<string, Job>();
@@ -230,7 +232,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 		liveCtx = ctx;
 		if (!pruned) {
 			pruned = true;
-			if (claimStateRoot(stateRoot)) {
+			if (ownsStateRoot) {
 				// In the background: never delays startup.
 				void pruneState(stateRoot).then(removed => removed && debug("state", `pruned ${removed} expired entries`));
 			} else {
