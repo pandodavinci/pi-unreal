@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { defaultStateRoot, stateRoot as resolveStateRoot } from "./binary";
+import { defaultStateRoot, RUNNER_VERSION, stateRoot as resolveStateRoot } from "./binary";
 import { registerChatMode } from "./chat-mode";
 import { claimStateRoot, pruneState } from "./state";
 import { type BridgeEvent, describe, emptyStats } from "./events";
@@ -234,7 +234,8 @@ export default function piUnreal(pi: ExtensionAPI) {
 			pruned = true;
 			if (ownsStateRoot) {
 				// In the background: never delays startup.
-				void pruneState(stateRoot).then(removed => removed && debug("state", `pruned ${removed} expired entries`));
+				const versions = [RUNNER_VERSION, process.env.PI_UNREAL_RUNNER_VERSION?.trim().replace(/^v/, "") ?? ""].filter(Boolean);
+				void pruneState(stateRoot, Date.now(), versions).then(removed => removed && debug("state", `pruned ${removed} expired entries`));
 			} else {
 				debug("state", `${stateRoot} holds files pi-unreal did not create: automatic cleanup is off there`);
 			}

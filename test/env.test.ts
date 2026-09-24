@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dotEnvNames, goTrimSpace, hardenEnvironment, inspectDotEnv, isUnpinnable, PINNED_ENV, shellHook, unpinnableReason } from "../src/env";
+import { dotEnvNames, goTrimSpace, hardenEnvironment, inspectDotEnv, isUnpinnable, PINNED_ENV, shellHook, unpinnableReason, zshHonorsZdotdir } from "../src/env";
 import { formatSummary, runUnreal } from "../src/runner";
 
 const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-env-"));
@@ -50,6 +50,21 @@ describe("refusals", () => {
 		expect(isUnpinnable("GIT_CONFIG_GLOBAL")).toBe(true);
 		expect(isUnpinnable("GIT_COMMIT_GRAPH_PARANOIA")).toBe(true);
 		expect(isUnpinnable("PS4")).toBe(false);
+	});
+
+	test("shell internals whose empty value breaks shell startup are refused; BASH_ENV is handled by the hook", () => {
+		for (const name of ["BASH_SOURCE", "BASH_ARGV", "BASHOPTS", "DIRSTACK", "POSIXLY_CORRECT", "FPATH", "FUNCNEST", "NULLCMD"]) {
+			expect({ name, reason: unpinnableReason(name) }).toEqual({ name, reason: "the shell itself reads it when it starts, even when it is empty" });
+		}
+		expect(isUnpinnable("BASH_ENV")).toBe(false);
+		expect(isUnpinnable("BASH_ENVIRONMENT")).toBe(true);
+	});
+
+	test("SANDBOX_EGRESS_PROXY's refusal does not suggest PI_UNREAL_TRUST_DOTENV (which refuses it too)", async () => {
+		const dir = tmpdir();
+		fs.writeFileSync(path.join(dir, ".env"), "SANDBOX_EGRESS_PROXY=http://evil:8080\n");
+		const result = await runUnreal({ task: "t", cwd: dir, stateDir: tmpdir(), command: ["/nonexistent"] });
+		expect(result.errorMessage).not.toContain("PI_UNREAL_TRUST_DOTENV");
 	});
 
 	test("build metadata under GIT_ names that git never reads is neutralized like any other name", () => {
@@ -187,12 +202,21 @@ describe("shellHook: Unreal's commands get your own environment back", () => {
 		expect(hooked.dotEnvEmpty).toEqual([]);
 	});
 
-	test("zsh: a system zshenv that sets ZDOTDIR itself means no hook (it would never run)", () => {
-		const system = path.join(tmpdir(), "zshenv");
-		fs.writeFileSync(system, 'export ZDOTDIR="$HOME/.config/zsh"\n');
+	test("zsh: when the system zshenv replaces ZDOTDIR, there is no hook (it would never run)", () => {
 		const original = { SHELL: "/bin/zsh" };
-		expect(shellHook(original, hardenEnvironment(original, ["FOO"]), tmpdir(), [], [system])).toBeUndefined();
-		expect(shellHook(original, hardenEnvironment(original, ["FOO"]), tmpdir(), [], [path.join(tmpdir(), "missing")])).toBeDefined();
+		expect(shellHook(original, hardenEnvironment(original, ["FOO"]), tmpdir(), [], () => false)).toBeUndefined();
+		expect(shellHook(original, hardenEnvironment(original, ["FOO"]), tmpdir(), [], () => true)).toBeDefined();
+	});
+
+	test.skipIf(!shells.includes("/bin/zsh"))("zsh: the probe asks zsh itself (this machine's system zshenv keeps ZDOTDIR)", () => {
+		expect(zshHonorsZdotdir("/bin/zsh", { PATH: process.env.PATH, HOME: tmpdir() })).toBe(true);
+	});
+
+	test("bash: a BASH_ENV of yours with quotes in its file name still runs", () => {
+		const env = home();
+		fs.writeFileSync(path.join(env.HOME, 'start"up'), "export FROM_MY_STARTUP=quoted\n");
+		const out = runCommand({ ...env, SHELL: "/bin/bash", BASH_ENV: '$HOME/start"up' }, ["DATABASE_URL"], 'printf "%s" "${FROM_MY_STARTUP-no}"');
+		expect(out).toBe("quoted");
 	});
 
 	test("a trusted .env that sets the startup variable is left alone", () => {

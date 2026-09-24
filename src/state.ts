@@ -1,7 +1,8 @@
 /**
  * Small persistent records under ~/.cache/pi-unreal, and their housekeeping.
  *
- * Per-run logs and background job output are disposable after two weeks. Unreal sessions are its conversation
+ * Per-run logs, background job output and runner downloads of versions no longer pinned are disposable after
+ * two weeks. Unreal sessions are its conversation
  * memory; they, their command output (sessions/operations/<id>) and ownership records, and pasted images live
  * 60 days since last use. A chat whose session was removed is simply re-seeded from its visible history.
  * Cancellations do not expire (the newest 20,000 are kept).
@@ -9,6 +10,7 @@
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { RUNNER_VERSION } from "./binary";
 
 const DAY = 24 * 60 * 60 * 1000;
 export const RETENTION = { runs: 14 * DAY, sessions: 60 * DAY, debugLogBytes: 10 * 1024 * 1024 };
@@ -60,9 +62,20 @@ export function claimStateRoot(root: string, isDefault: boolean): boolean {
  * Remove expired files under the state root, if it is pi-unreal's (see claimStateRoot). Never throws.
  * Returns how many entries were removed.
  */
-export async function pruneState(root: string, now = Date.now()): Promise<number> {
+export async function pruneState(root: string, now = Date.now(), runnerVersions: readonly string[] = [RUNNER_VERSION]): Promise<number> {
 	if (!fsSync.existsSync(path.join(root, MARKER))) return 0;
 	let removed = 0;
+	// Runner downloads of versions no longer pinned, once unused for two weeks (a used version is touched).
+	try {
+		for (const version of await fs.readdir(path.join(root, "bin"))) {
+			if (runnerVersions.includes(version)) continue;
+			const dir = path.join(root, "bin", version);
+			if (now - (await fs.lstat(dir)).mtimeMs > RETENTION.runs) {
+				await fs.rm(dir, { recursive: true, force: true });
+				removed++;
+			}
+		}
+	} catch {}
 	for (const dir of ["jobs", "chat"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.runs, now);
 	for (const dir of ["images"]) removed += await removeOlderThan(path.join(root, dir), RETENTION.sessions, now);
 	// Sessions, then everything that belongs to a session that is gone.

@@ -28,13 +28,14 @@ export function stateRoot(env: Record<string, string | undefined> = process.env)
 	return configured ? path.resolve(configured) : defaultStateRoot();
 }
 
-export class UnsupportedPlatformError extends Error {}
+/** A setup problem that no network retry can fix (unsupported platform, bad version setting). */
+export class RunnerSetupError extends Error {}
 
 export function platformTag(platform = process.platform, arch = process.arch): string {
 	const goos = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : undefined;
 	const goarch = arch === "arm64" ? "arm64" : arch === "x64" ? "amd64" : undefined;
 	if (!goos || !goarch) {
-		throw new UnsupportedPlatformError(
+		throw new RunnerSetupError(
 			`Unreal Agent publishes runners for macOS and Linux (x64/arm64) only, and pi-unreal supports only those; this is ${platform}/${arch}.`,
 		);
 	}
@@ -65,9 +66,18 @@ export async function resolveRunner(
 	if (env.UNREAL_AGENT_RUNNER) return env.UNREAL_AGENT_RUNNER;
 	const version = env.PI_UNREAL_RUNNER_VERSION?.trim().replace(/^v/, "") || RUNNER_VERSION;
 	// It becomes part of a URL and a cache path.
-	if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`PI_UNREAL_RUNNER_VERSION is not a release version: ${version}`);
+	if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+		throw new RunnerSetupError(`PI_UNREAL_RUNNER_VERSION is not a release version (like ${RUNNER_VERSION}): ${version}`);
+	}
 	const target = path.join(stateRoot(env), "bin", version, platformTag(), BINARY);
-	if (cachedBinaryIsIntact(target)) return target;
+	if (cachedBinaryIsIntact(target)) {
+		// Marks the version as in use, so housekeeping keeps it (state.ts).
+		try {
+			const now = new Date();
+			fs.utimesSync(path.join(stateRoot(env), "bin", version), now, now);
+		} catch {}
+		return target;
+	}
 	let pending = inflight.get(target);
 	if (!pending) {
 		pending = download(version, target, log, fetchImpl).finally(() => inflight.delete(target));

@@ -44,6 +44,20 @@ test("runs expire after 14 days; sessions and what belongs to them after 60 days
 	expect(fs.existsSync(path.join(root, "debug.log.old"))).toBe(true);
 });
 
+test("runner downloads of versions no longer pinned go after two weeks unused; pinned and recently used ones stay", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-bins-"));
+	expect(claimStateRoot(root, false)).toBe(true);
+	const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+	for (const version of ["0.1.1", "0.0.9", "9.9.9"]) {
+		fs.mkdirSync(path.join(root, "bin", version, "darwin_arm64"), { recursive: true });
+		if (version !== "0.0.9") fs.utimesSync(path.join(root, "bin", version), old, old);
+	}
+	await pruneState(root, Date.now(), ["9.9.9"]);
+	expect(fs.existsSync(path.join(root, "bin", "0.1.1"))).toBe(false); // old and unused
+	expect(fs.existsSync(path.join(root, "bin", "0.0.9"))).toBe(true); // used recently
+	expect(fs.existsSync(path.join(root, "bin", "9.9.9"))).toBe(true); // pinned
+});
+
 test("a missing state directory is fine", async () => {
 	expect(await pruneState(path.join(os.tmpdir(), "pi-unreal-does-not-exist"))).toBe(0);
 });

@@ -11,5 +11,5 @@ First release.
 - Downloads and verifies the official `unreal-agent-runner` release (v0.2.0) on first use, with a visible status line and actionable setup errors.
 - Keeps a workspace `.env` away from Unreal Agent (unreal-agent#5), tested against the real runner for API key exfiltration and shell code injection. With bash and zsh, Unreal's commands still start with your own environment, so a project's own tools can load its `.env`.
 - Kills the commands Unreal started on Esc, crash or exit; never blocks the host's UI thread.
-- Housekeeping: old logs, job output, sessions and images are pruned automatically, only in a directory pi-unreal created.
+- Housekeeping: old logs, job output, sessions, images and runner downloads are pruned automatically, never in a directory that already held other files.
 - CI: unit and integration tests on macOS and Linux, a Node load test, and end-to-end runs of the real `pi` and `omp` binaries.

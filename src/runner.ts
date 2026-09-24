@@ -11,7 +11,7 @@ import { type ChildProcessByStdio, execFile, execFileSync, spawn } from "node:ch
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Readable } from "node:stream";
-import { resolveRunner, UnsupportedPlatformError } from "./binary";
+import { resolveRunner, RunnerSetupError } from "./binary";
 import { hardenEnvironment, inspectDotEnv, isUnpinnable, shellHook, unpinnableReason } from "./env";
 import { type BridgeEvent, EventMapper, type RunStats } from "./events";
 
@@ -199,7 +199,8 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		errorMessage: `Refusing to run: ${path.join(opts.cwd, ".env")} sets ${refused
 			.map(name => `${name} (${unpinnableReason(name)})`)
 			.join(", ")}, which pi-unreal cannot keep away from Unreal Agent. Remove or rename ${refused.length > 1 ? "them" : "it"}${
-			trustDotEnv ? "" : ", or set PI_UNREAL_TRUST_DOTENV=1 if you trust this repository"
+			// PI_UNREAL_TRUST_DOTENV=1 lets everything through except SANDBOX_EGRESS_PROXY.
+			trustDotEnv || refused.every(name => name === "SANDBOX_EGRESS_PROXY") ? "" : ", or set PI_UNREAL_TRUST_DOTENV=1 if you trust this repository"
 		}.`,
 	});
 	const early = readDotEnv();
@@ -247,7 +248,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			exitCode: null,
 			durationMs: performance.now() - started,
 			errorMessage:
-				err instanceof UnsupportedPlatformError
+				err instanceof RunnerSetupError
 					? err.message
 					: `Could not get the Unreal Agent runner: ${err instanceof Error ? err.message : String(err)}\nCheck your connection to github.com, or install unreal-agent-runner yourself and set UNREAL_AGENT_RUNNER.`,
 		};

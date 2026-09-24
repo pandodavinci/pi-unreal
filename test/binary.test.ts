@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseSums, platformTag, resolveRunner, RUNNER_VERSION, UnsupportedPlatformError } from "../src/binary";
+import { parseSums, platformTag, resolveRunner, RUNNER_VERSION, RunnerSetupError } from "../src/binary";
 
 const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-bin-"));
 
@@ -42,7 +42,7 @@ describe("binary", () => {
 	test("platformTag maps to Go release names and rejects unsupported platforms", () => {
 		expect(platformTag("darwin", "arm64")).toBe("darwin_arm64");
 		expect(platformTag("linux", "x64")).toBe("linux_amd64");
-		expect(() => platformTag("win32", "x64")).toThrow(UnsupportedPlatformError);
+		expect(() => platformTag("win32", "x64")).toThrow(RunnerSetupError);
 		expect(() => platformTag("win32", "x64")).toThrow("macOS and Linux");
 	});
 
@@ -60,6 +60,7 @@ describe("binary", () => {
 	test("PI_UNREAL_RUNNER_VERSION must be a release version (it ends up in a URL and a path)", async () => {
 		const { fetchImpl, requested } = fakeRelease();
 		for (const version of ["../../etc", "latest", "1.2"]) {
+			await expect(resolveRunner({ PI_UNREAL_STATE_DIR: tmpdir(), PI_UNREAL_RUNNER_VERSION: version }, undefined, fetchImpl)).rejects.toThrow(RunnerSetupError);
 			await expect(resolveRunner({ PI_UNREAL_STATE_DIR: tmpdir(), PI_UNREAL_RUNNER_VERSION: version }, undefined, fetchImpl)).rejects.toThrow(
 				"not a release version",
 			);

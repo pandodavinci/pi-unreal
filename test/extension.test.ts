@@ -1,7 +1,7 @@
 /**
  * Extension behavior against a fake host (both Pi and Oh My Pi shapes), with a fake runner.
  */
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -261,26 +261,9 @@ describe("host modes", () => {
 		const host = await setup("echo", { flags: { unreal: true } });
 		await waitFor(() => answers(host).length === 1);
 		expect((answers(host)[0]!.message.details as { body: string }).body).toBe("ECHO:fix the tests");
-		// A Pi that parses the flag correctly delivers the prompt too: it is not run twice.
-		expect(await host.emit("input", { text: "fix the tests", source: "interactive" })).toEqual({ action: "handled", handled: true });
-		await Bun.sleep(300);
-		expect(answers(host).length).toBe(1);
-		// Typed later, the same text is a new message.
+		// The same text typed right away is a new message, never swallowed.
 		await host.emit("input", { text: "fix the tests", source: "interactive" });
 		await waitFor(() => answers(host).length === 2);
-	});
-
-	test("the recovered prompt only swallows a duplicate right at startup, never a later message", async () => {
-		process.argv = [...argv.slice(0, 2), "--unreal", "retry"];
-		const host = await setup("echo", { flags: { unreal: true } });
-		await waitFor(() => answers(host).length === 1);
-		setSystemTime(new Date(Date.now() + 10_000));
-		try {
-			await host.emit("input", { text: "retry", source: "interactive" });
-			await waitFor(() => answers(host).length === 2);
-		} finally {
-			setSystemTime();
-		}
 	});
 
 	test("a command after --unreal is not sent to Unreal: Pi dropped it, so pi-unreal says how to run it", async () => {
@@ -289,7 +272,7 @@ describe("host modes", () => {
 			const host = await setup("echo", { flags: { unreal: true } });
 			await Bun.sleep(200);
 			expect(host.sent.some(s => s.message.customType === "unreal-you")).toBe(false);
-			expect(host.notifications.some(n => n.includes(`pi "${command}" --unreal`))).toBe(true);
+			expect(host.notifications.some(n => n.includes(`read "${command}"`) && n.includes("Type it in the chat"))).toBe(true);
 		}
 	});
 

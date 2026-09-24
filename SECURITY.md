@@ -25,6 +25,9 @@ By default the project's `.env` never reaches Unreal Agent:
    a function definition for Bash) and `GIT_*` variables (for git, set-but-empty often differs from unset:
    `GIT_SSL_NO_VERIFY` disables certificate checks when merely present). Build metadata that git never reads
    (`GIT_SHA`, `GIT_COMMIT_SHA`, `GIT_BRANCH`, `GIT_TAG` and a few more) is neutralized like any other name.
+   Shell internals that bash or zsh read at startup even when empty are refused too (`BASH_*` other than
+   `BASH_ENV`, `POSIXLY_CORRECT`, `FPATH`, ...): with macOS's bash, an empty `BASH_SOURCE` makes a startup file
+   that finds its helpers through it load them from the project instead.
 4. The runner's own credentials and endpoints (`UNREAL_HARNESS_LLM_*`, provider API keys, Codex auth, proxy and
    TLS settings) are pinned in every mode, and `SANDBOX_EGRESS_PROXY` is refused in every mode.
 
@@ -46,6 +49,9 @@ Limits:
   runner itself, since the placeholders are gone before a command starts. With other shells, a variable whose
   mere presence changes a tool's behavior, and that is not in the refusal list, reaches commands as an empty
   value.
+- Variables bash fills in itself only when the environment lacks them (`UID`, `HOSTNAME`, `OSTYPE`, ...) are
+  empty inside the command's own bash when the project's `.env` defines them. The tools the command runs see
+  them exactly as in your terminal.
 - If a system-wide zsh file (`/etc/zshenv`) sets `ZDOTDIR` itself, the startup file could not run, so
   pi-unreal does not use one and commands keep the placeholders (as with other shells).
 - pi-unreal and the runner read the `.env` separately, a moment apart. A process that rewrites the file in that
@@ -75,8 +81,9 @@ would be willing to run yourself.
 
 Files pi-unreal writes (pasted images, debug log, downloaded runner, the startup files above) live under
 `~/.cache/pi-unreal` (or `PI_UNREAL_STATE_DIR`) with private permissions; directories and the debug log from
-older versions are tightened on use. Old files are removed automatically, but only from a directory pi-unreal
-created, never from one that already held other files.
+older versions are tightened on use. Old files are removed automatically, but only from pi-unreal's own
+directory: the default one, or a `PI_UNREAL_STATE_DIR` that pi-unreal created or found empty. A directory that
+already held other files is used as is and never cleaned.
 
 ## Runner download
 
