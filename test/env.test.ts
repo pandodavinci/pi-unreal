@@ -187,6 +187,14 @@ describe("shellHook: Unreal's commands get your own environment back", () => {
 		expect(hooked.dotEnvEmpty).toEqual([]);
 	});
 
+	test("zsh: a system zshenv that sets ZDOTDIR itself means no hook (it would never run)", () => {
+		const system = path.join(tmpdir(), "zshenv");
+		fs.writeFileSync(system, 'export ZDOTDIR="$HOME/.config/zsh"\n');
+		const original = { SHELL: "/bin/zsh" };
+		expect(shellHook(original, hardenEnvironment(original, ["FOO"]), tmpdir(), [], [system])).toBeUndefined();
+		expect(shellHook(original, hardenEnvironment(original, ["FOO"]), tmpdir(), [], [path.join(tmpdir(), "missing")])).toBeDefined();
+	});
+
 	test("a trusted .env that sets the startup variable is left alone", () => {
 		const original = { SHELL: "/bin/bash" };
 		expect(shellHook(original, hardenEnvironment(original), tmpdir(), ["BASH_ENV"])).toBeUndefined();

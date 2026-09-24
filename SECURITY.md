@@ -46,8 +46,8 @@ Limits:
   runner itself, since the placeholders are gone before a command starts. With other shells, a variable whose
   mere presence changes a tool's behavior, and that is not in the refusal list, reaches commands as an empty
   value.
-- If a system-wide zsh file (`/etc/zshenv`) sets `ZDOTDIR` itself, the startup file does not run and commands
-  keep the placeholders (as with other shells).
+- If a system-wide zsh file (`/etc/zshenv`) sets `ZDOTDIR` itself, the startup file could not run, so
+  pi-unreal does not use one and commands keep the placeholders (as with other shells).
 - pi-unreal and the runner read the `.env` separately, a moment apart. A process that rewrites the file in that
   instant is outside this protection.
 

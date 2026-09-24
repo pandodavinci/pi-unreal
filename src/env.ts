@@ -147,6 +147,13 @@ function neutralValue(name: string, env: Record<string, string | undefined>): st
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const readText = (file: string) => {
+	try {
+		return fs.readFileSync(file, "utf8");
+	} catch {
+		return "";
+	}
+};
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 /** Bash variables that lose their special meaning when unset (bash(1), "Shell Variables"). Left alone. */
 const BASH_SPECIAL = new Set([
@@ -182,10 +189,13 @@ export function shellHook(
 	hardened: Record<string, string | undefined>,
 	dir: string,
 	leave: readonly string[] = [],
+	systemZshenv: readonly string[] = ["/etc/zshenv", "/etc/zsh/zshenv"],
 ): Record<string, string> | undefined {
 	const shell = path.basename(hardened.SHELL?.trim() ?? "");
 	const hookVar = shell === "bash" ? "BASH_ENV" : shell === "zsh" ? "ZDOTDIR" : undefined;
 	if (!hookVar || leave.includes(hookVar)) return undefined;
+	// zsh reads the system file first; if it sets ZDOTDIR, the hook would never run.
+	if (hookVar === "ZDOTDIR" && systemZshenv.some(file => readText(file).includes("ZDOTDIR"))) return undefined;
 	const placeholders = Object.keys(hardened).filter(
 		name => original[name] === undefined && hardened[name] !== undefined && name !== hookVar && IDENTIFIER.test(name),
 	);
