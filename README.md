@@ -85,7 +85,7 @@ Pi stays interactive. `/unreal-jobs` shows progress, `/unreal-cancel` stops the 
 | Type while it works | Messages queue and run in order. Esc stops the current one and drops the queue. |
 | `/harness pi`, `/harness unreal` | Switch who answers, in the same chat. Refused while the other side is still working. |
 
-Slash commands and `!bash` typed in the chat always go to Pi (given on the command line, they are stopped with a note to type them in the chat). A prompt on the command line goes to Unreal too (`pi --unreal "fix the tests"`). In Oh My Pi this works for a quoted message (also after `@file` context when the message has more than one word) and needs Oh My Pi's own model login; a prompt made only of `@file` or piped input stays with Oh My Pi. Type those in the chat instead.
+Slash commands and `!bash` typed in the chat always go to Pi (given on the command line, they are stopped with a note to type them in the chat). A prompt on the command line goes to Unreal too (`pi --unreal "fix the tests"`). In Oh My Pi this works for a quoted message (also after `@file` context when the message has more than one word) and needs Oh My Pi's own model login; a prompt made only of `@file` or piped input, or `@file` followed by a one-word message or command, stays with Oh My Pi. Type those in the chat instead.
 
 | Mode | `--unreal` | `/unreal`, `unreal_delegate` |
 | --- | --- | --- |

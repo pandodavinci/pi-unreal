@@ -20,7 +20,8 @@ By default the project's `.env` never reaches Unreal Agent:
 2. Right before the runner starts, every one of those names is set: to your own value if you have one,
    otherwise to an empty string (`ZDOTDIR` to `$HOME`, which is what zsh does when it is unset). The runner
    skips variables that are already set, so it ignores the file's values.
-3. Names that an empty value cannot neutralize cause a refusal before anything runs:
+3. Names that an empty value cannot neutralize cause a refusal before anything runs (and `__proto__`, which
+   Bun, Oh My Pi's runtime, drops from a spawned process's environment):
    `SANDBOX_EGRESS_PROXY` (the runner applies it even when already set), `BASH_FUNC_*` (an empty value is still
    a function definition for Bash) and `GIT_*` variables (for git, set-but-empty often differs from unset:
    `GIT_SSL_NO_VERIFY` disables certificate checks when merely present). Build metadata that git never reads
