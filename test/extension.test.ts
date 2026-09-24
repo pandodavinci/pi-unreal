@@ -280,11 +280,13 @@ describe("host modes", () => {
 		for (const command of ["/exit", "!ls"]) {
 			process.argv = [...argv, command];
 			const host = await setup("echo", { ohMyPi: true, flags: { unreal: true } });
+			host.state.idle = false; // Oh My Pi is mid-setup of its own turn here
+			host.state.editorText = command; // and restores the aborted prompt into the editor
 			await host.emit("before_agent_start", { prompt: command });
 			expect(host.state.aborts).toBe(1);
-			await Bun.sleep(200);
+			await waitFor(() => host.notifications.some(n => n.includes("Type it in the chat")));
+			expect(host.state.editorText).toBe("");
 			expect(host.sent.some(s => s.message.customType === "unreal-you")).toBe(false);
-			expect(host.notifications.some(n => n.includes("Type it in the chat"))).toBe(true);
 		}
 	});
 

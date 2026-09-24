@@ -39,7 +39,7 @@ export function createFakeHost(
 	const sent: Sent[] = [];
 	const notifications: string[] = [];
 	const terminalListeners = new Set<(data: string) => unknown>();
-	const state = { idle: true, sessionId: "s1", branch: [] as unknown[], aborts: 0 };
+	const state = { idle: true, sessionId: "s1", branch: [] as unknown[], aborts: 0, editorText: "" };
 
 	const ctx: FakeContext = {
 		cwd: opts.cwd ?? fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-host-")),
@@ -60,6 +60,10 @@ export function createFakeHost(
 			setStatus: (() => {}) as never,
 			setWidget: (() => {}) as never,
 			select: (async () => undefined) as never,
+			getEditorText: (() => state.editorText) as never,
+			setEditorText: ((text: string) => {
+				state.editorText = text;
+			}) as never,
 			onTerminalInput: ((listener: (data: string) => unknown) => {
 				terminalListeners.add(listener);
 				return () => terminalListeners.delete(listener);
