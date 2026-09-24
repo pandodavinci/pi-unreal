@@ -76,8 +76,9 @@ describe("refusals", () => {
 		const names = ["constructor", "toString", "__proto__"];
 		const env = hardenEnvironment({ PATH: process.env.PATH }, names);
 		for (const name of names) expect({ name, own: Object.hasOwn(env, name), value: env[name] }).toEqual({ name, own: true, value: "" });
+		// What reaches a spawned process (__proto__ is refused instead: Bun drops it here).
 		const printed = spawnSync("/usr/bin/env", { env: env as NodeJS.ProcessEnv, encoding: "utf8" }).stdout.split("\n");
-		for (const name of names) expect(printed).toContain(`${name}=`);
+		for (const name of ["constructor", "toString"]) expect(printed).toContain(`${name}=`);
 	});
 
 	test("build metadata under GIT_ names that git never reads is neutralized like any other name", () => {
