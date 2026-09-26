@@ -82,7 +82,7 @@ Pi stays interactive. `/unreal-jobs` shows progress, `/unreal-cancel` stops the 
 | --- | --- |
 | Type a message | Unreal answers. It remembers the conversation, and is caught up on anything it missed: messages Pi handled, background results, or a forked chat's history (the last 12,000 characters). Going back with `/tree` or forking starts a fresh Unreal session for that branch. |
 | Paste an image (Ctrl+V) | Unreal opens it with its ViewImage tool. |
-| Type while it works | Messages queue and run in order. Esc stops the current one and drops the queue. |
+| Type while it works | Your message goes straight to Unreal, which reads it at its next step, even while a command runs (needs a runner with `stream_input`, see below). One that arrives just as Unreal finishes starts the next run. With older runners, messages queue and run in order. Esc stops everything. |
 | `/harness pi`, `/harness unreal` | Switch who answers, in the same chat. Refused while the other side is still working. |
 
 Slash commands and `!bash` typed in the chat always go to Pi (given on the command line, they are stopped with a note to type them in the chat). A prompt on the command line goes to Unreal too (`pi --unreal "fix the tests"`). In Oh My Pi this works for a quoted message (also after `@file` context when the message has more than one word) and needs Oh My Pi's own model login; a prompt made only of `@file` or piped input, or `@file` followed by a one-word message or command, stays with Oh My Pi. Type those in the chat instead.
@@ -100,6 +100,7 @@ In print mode, run `/unreal` in a fresh session (`--no-session`): when resuming 
 | --- | --- |
 | `/unreal <task>` | Start a background job. |
 | `/unreal-jobs` | List jobs; pick one to show its full result in the chat. |
+| `/unreal-say [id] <text>` | Send a message to a running job (default: the most recent). Needs a runner with `stream_input`. |
 | `/unreal-cancel [id\|all]` | Stop a job (default: the most recent). |
 
 ### How it works
@@ -133,7 +134,13 @@ In `--unreal` mode the messages you type are handled before they reach Pi's agen
 Set these in your shell, not in a project's `.env`: unless you set `PI_UNREAL_TRUST_DOTENV=1`, Unreal Agent never reads a project's `.env` ([details](SECURITY.md)). With bash and zsh, the commands it runs start with your own environment, so a project's own tools still load their `.env`, as in your terminal.
 
 > [!NOTE]
-> **Streaming.** Released Unreal runners (v0.2.0) accept `include_partial_messages` but ignore it, so each reply appears when it is complete while the step list updates live. pi-unreal already requests streaming and shows replies word by word with any runner that implements it. An implementation is proposed upstream in [unreal-agent#10](https://github.com/unreallabsai/unreal-agent/issues/10); to try it now, build [that branch](https://github.com/pandodavinci/unreal-agent/tree/partial-messages) and set `UNREAL_AGENT_RUNNER`.
+> **Streaming and talking to Unreal while it works.** Released Unreal runners (v0.2.0) do not stream replies and cannot take messages mid-task, so replies appear when complete and messages typed meanwhile wait their turn. pi-unreal uses both features with any runner that has them: `include_partial_messages` ([unreal-agent#10](https://github.com/unreallabsai/unreal-agent/issues/10)) and `stream_input`. To try them now, build [our fork](https://github.com/pandodavinci/unreal-agent) and point `UNREAL_AGENT_RUNNER` at it:
+>
+> ```sh
+> git clone https://github.com/pandodavinci/unreal-agent && cd unreal-agent
+> go build -o bin/unreal-agent-runner ./cmd/unreal-agent-runner
+> export UNREAL_AGENT_RUNNER="$PWD/bin/unreal-agent-runner"
+> ```
 
 > [!WARNING]
 > Unreal Agent runs shell commands in your project with your permissions, like any coding agent. pi-unreal keeps a repo's `.env` away from Unreal, but a malicious repo can still try to steer the agent through its files. Details in [SECURITY.md](SECURITY.md).

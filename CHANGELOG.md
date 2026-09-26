@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Talk to Unreal while it works: in `--unreal` mode a message typed mid-task goes straight to Unreal, which reads it at its next step, even while a command runs. A message that arrives as the task ends starts the next run under the same ID, so Unreal never takes it twice. Needs a runner with `stream_input` (our fork for now); with older runners messages still queue, with a one-line note.
+- `/unreal-say [id] <text>`: send a message to a running background job.
+
 ## 0.1.0
 
 First release.

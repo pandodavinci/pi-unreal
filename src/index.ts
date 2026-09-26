@@ -4,6 +4,7 @@
  *   pi --unreal             every message goes to Unreal Agent (chat-mode.ts); /harness unreal|pi toggles
  *   /unreal <task>          run a task in Unreal in the background while you keep chatting
  *   /unreal-jobs            list background jobs and their latest steps
+ *   /unreal-say [id] <text> send a message to a running background job (needs a runner with stream_input)
  *   /unreal-cancel [id|all] cancel a background job (SIGINT, then SIGKILL of the whole process tree)
  *   unreal_delegate tool    lets the host's model hand a task to Unreal (foreground or background)
  *
@@ -11,6 +12,7 @@
  *      UNREAL_AGENT_RUNNER, PI_UNREAL_RUNNER_VERSION, PI_UNREAL_STATE_DIR, PI_UNREAL_THINKING, PI_UNREAL_MODE=1,
  *      PI_UNREAL_TRUST_DOTENV=1, PI_UNREAL_DEBUG=1.
  */
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -20,7 +22,7 @@ import { registerChatMode } from "./chat-mode";
 import { claimStateRoot, pruneState } from "./state";
 import { type BridgeEvent, describe, emptyStats } from "./events";
 import { hostMode, idleMessagesReachClient, safeTimers, tell, wakeModelDelivery, SHUTDOWN_FORCE_WAIT_MS, SHUTDOWN_GRACE_MS, withDeadline } from "./host";
-import { formatSummary, runUnreal, type UnrealRunResult } from "./runner";
+import { formatSummary, runUnreal, type SteerFn, type UnrealRunResult } from "./runner";
 
 type Origin = "command" | "tool";
 
@@ -34,6 +36,10 @@ interface Job {
 	controller: AbortController;
 	force: AbortController;
 	lines: string[];
+	/** Set once the runner started: a send function, or undefined if the runner cannot take messages. */
+	steer?: { send: SteerFn | undefined };
+	/** Messages sent with /unreal-say, by ID. */
+	notes: Map<string, string>;
 	result?: UnrealRunResult;
 	done: Promise<UnrealRunResult>;
 }
@@ -165,6 +171,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 			controller,
 			force,
 			lines: [],
+			notes: new Map(),
 			done: undefined as never,
 		};
 		jobs.set(id, job);
@@ -177,6 +184,9 @@ export default function piUnreal(pi: ExtensionAPI) {
 			signal: controller.signal,
 			forceSignal: force.signal,
 			debugLog: msg => debug(id, msg),
+			onSteer: send => {
+				job.steer = { send };
+			},
 			onStatus: message => {
 				job.lines.push(`· ${message}`);
 				onEvent?.(`· ${message}`);
@@ -198,6 +208,7 @@ export default function piUnreal(pi: ExtensionAPI) {
 					signalCode: null,
 					stopReason: "",
 					promptPersisted: false,
+					deliveredIds: [],
 					finalText: "",
 					stats: emptyStats(),
 					durationMs: Date.now() - job.startedAt,
@@ -209,6 +220,10 @@ export default function piUnreal(pi: ExtensionAPI) {
 			)
 			.then(result => {
 				job.result = result;
+				const unread = [...job.notes].filter(([noteId]) => !result.deliveredIds.includes(noteId));
+				if (unread.length && result.status !== "cancelled") {
+					liveCtx?.ui.notify(`unreal ${id} finished before reading: ${unread.map(([, text]) => clip(text, 60)).join("; ")}`, "warning");
+				}
 				pruneFinishedJobs();
 				signal?.removeEventListener("abort", forward);
 				debug(id, `done status=${result.status} exit=${result.exitCode} ${JSON.stringify(result.stats)}`);
@@ -300,6 +315,43 @@ export default function piUnreal(pi: ExtensionAPI) {
 				details: { jobId: job.id, task: job.task, ...job.result, stderr: job.result.stderr.slice(-4000) },
 				attribution: "agent",
 			} as never);
+		},
+	});
+
+	pi.registerCommand("unreal-say", {
+		description: "Send a message to a running Unreal job: /unreal-say [id] <text> (default: most recent)",
+		handler: async (args, ctx) => {
+			liveCtx = ctx;
+			const [first = "", ...rest] = args.trim().split(/\s+/);
+			const here = running().filter(j => j.sessionId === ctx.sessionManager.getSessionId());
+			const named = jobs.get(first);
+			const job = named ?? here.at(-1);
+			const text = (named ? rest.join(" ") : args).trim();
+			if (!text) {
+				ctx.ui.notify("Usage: /unreal-say [id] <text>", "warning");
+				return;
+			}
+			if (!job || job.result) {
+				ctx.ui.notify(named ? `unreal ${named.id} is not running.` : "No running unreal jobs here.", "warning");
+				return;
+			}
+			if (!job.steer) {
+				ctx.ui.notify(`unreal ${job.id} is still starting. Send it again in a moment.`, "warning");
+				return;
+			}
+			if (!job.steer.send) {
+				ctx.ui.notify("This Unreal runner cannot take messages while it works. A runner with stream_input (see the README) fixes that.", "warning");
+				return;
+			}
+			const noteId = randomUUID();
+			if (!job.steer.send(text, noteId)) {
+				ctx.ui.notify(`unreal ${job.id} is finishing and did not take the message.`, "warning");
+				return;
+			}
+			job.notes.set(noteId, text);
+			job.lines.push(`you: ${clip(text, 100)}`);
+			refreshUi();
+			ctx.ui.notify(`Sent to unreal ${job.id}.`, "info");
 		},
 	});
 

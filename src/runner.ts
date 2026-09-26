@@ -10,8 +10,8 @@
 import { type ChildProcessByStdio, execFile, execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Readable } from "node:stream";
-import { resolveRunner, RunnerSetupError } from "./binary";
+import type { Readable, Writable } from "node:stream";
+import { resolveRunner, RunnerSetupError, supportsStreamInput } from "./binary";
 import { hardenEnvironment, inspectDotEnv, isUnpinnable, own, shellHook, unpinnableReason, zshHonorsZdotdirAsync } from "./env";
 import { type BridgeEvent, EventMapper, type RunStats } from "./events";
 
@@ -39,9 +39,22 @@ export interface UnrealRunOptions {
 	model?: string;
 	/** Ask the runner for streaming {"type":"partial"} previews (needs the partial-messages runner build). */
 	includePartials?: boolean;
+	/** ID of the prompt message (a UUID). Unreal ignores a message ID it has already recorded in the session. */
+	messageId?: string;
+	/**
+	 * Keep the runner's stdin open for messages sent while it works (runner `stream_input`). Called once the
+	 * runner has started, with a send function, or with undefined if this runner build cannot take messages.
+	 */
+	onSteer?: (send: SteerFn | undefined) => void;
 	killGraceMs?: number;
 	debugLog?: (msg: string) => void;
 }
+
+/**
+ * Sends a user message to the running agent. Returns false once the runner's input is closed. A message
+ * reached Unreal only when its ID shows up in `deliveredIds`; one sent as the run ends may not.
+ */
+export type SteerFn = (content: string, messageId: string) => boolean;
 
 /**
  * completed  runner exited 0 and the last model response stopped normally
@@ -59,6 +72,8 @@ export interface UnrealRunResult {
 	stopReason: string;
 	/** The runner persisted the prompt, so Unreal's session contains this turn. */
 	promptPersisted: boolean;
+	/** IDs of the user messages Unreal recorded in this run: the prompt, then messages sent while it worked. */
+	deliveredIds: string[];
 	finalText: string;
 	stats: RunStats;
 	durationMs: number;
@@ -171,6 +186,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		signalCode: null,
 		stopReason: "",
 		promptPersisted: false,
+		deliveredIds: [],
 		finalText: "",
 		stats: mapper.stats,
 		stderr: "",
@@ -215,7 +231,9 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		durationMs: performance.now() - started,
 	});
 
-	const request: Record<string, unknown> = { prompt: opts.task };
+	const request: Record<string, unknown> = opts.messageId
+		? { messages: [{ role: "user", content: opts.task, message_id: opts.messageId }] }
+		: { prompt: opts.task };
 	const thinking = opts.thinkingLevel ?? baseEnv.PI_UNREAL_THINKING;
 	if (thinking) request.thinking_level = thinking;
 	if (opts.model) request.model = opts.model;
@@ -223,6 +241,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	if (opts.includePartials) request.include_partial_messages = true;
 
 	let argv: string[];
+	let streaming = false;
 	try {
 		const log = (message: string) => {
 			debug(message);
@@ -230,6 +249,11 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		};
 		const runner = opts.command ?? [await untilAborted(resolveRunner(baseEnv, log), opts.signal, opts.forceSignal)];
 		if (aborted()) return cancelledBeforeStart();
+		if (opts.onSteer) {
+			streaming = await untilAborted(supportsStreamInput(runner), opts.signal, opts.forceSignal);
+			if (aborted()) return cancelledBeforeStart();
+			if (streaming) request.stream_input = true;
+		}
 		argv = [
 			...runner,
 			"-workspace",
@@ -282,10 +306,10 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 
 	// Node APIs only: Pi runs extensions on Node, Oh My Pi on the Bun runtime.
 	// detached: own process group, so terminal Ctrl-C does not hit it directly and we can signal the group.
-	let child: ChildProcessByStdio<null, Readable, Readable>;
+	let child: ChildProcessByStdio<Writable | null, Readable, Readable>;
 	let exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 	try {
-		child = spawn(argv[0]!, argv.slice(1), { cwd: opts.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+		child = spawn(argv[0]!, argv.slice(1), { cwd: opts.cwd, env, stdio: [streaming ? "pipe" : "ignore", "pipe", "pipe"], detached: true }) as typeof child;
 		exited = new Promise(resolve => child.once("close", (code, signal) => resolve({ code, signal })));
 		const spawnError = await new Promise<Error | undefined>(resolve => {
 			child.once("spawn", () => resolve(undefined));
@@ -303,6 +327,29 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 	}
 	const pid = child.pid!;
 	debug(`pid=${pid}`);
+
+	// With stream_input the runner reads one JSON message per line from stdin until the run ends.
+	let inputOpen = streaming && child.stdin !== null;
+	const closeInput = () => {
+		inputOpen = false;
+		child.stdin?.destroy();
+	};
+	// A write racing the runner's exit fails with EPIPE; the message then simply did not arrive.
+	child.stdin?.on("error", err => {
+		debug(`stdin: ${String(err)}`);
+		inputOpen = false;
+	});
+	const send: SteerFn = (content, messageId) => {
+		if (!inputOpen) return false;
+		debug(`steer ${messageId}`);
+		child.stdin!.write(`${JSON.stringify({ role: "user", content, message_id: messageId })}\n`);
+		return true;
+	};
+	try {
+		opts.onSteer?.(streaming ? send : undefined);
+	} catch (err) {
+		debug(`onSteer threw: ${String(err)}`);
+	}
 
 	// Track descendants while the runner lives; they get reparented (and invisible) once it dies.
 	const known = new Map<number, Proc>();
@@ -441,10 +488,12 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 			debug(streamError);
 			hardKill("stream error");
 		}
+		closeInput();
 		const exit = await exited;
 		exitCode = exit.code;
 		signalCode = exit.signal;
 	} finally {
+		closeInput();
 		clearInterval(treePoll);
 		clearTimeout(killTimer);
 		opts.signal?.removeEventListener("abort", onAbort);
@@ -490,6 +539,7 @@ export async function runUnreal(opts: UnrealRunOptions): Promise<UnrealRunResult
 		signalCode,
 		stopReason: mapper.lastStop,
 		promptPersisted: mapper.promptPersisted,
+		deliveredIds: [...mapper.deliveredIds],
 		finalText: mapper.finalText,
 		stats: mapper.stats,
 		durationMs: performance.now() - started,

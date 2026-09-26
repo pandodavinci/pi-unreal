@@ -114,10 +114,13 @@ export function createFakeHost(
 }
 
 /** A runner executable (shell wrapper around fake-runner.ts) for UNREAL_AGENT_RUNNER. */
-export function fakeRunnerExecutable(mode: string, record?: string): string {
+export function fakeRunnerExecutable(mode: string, record?: string, extraEnv: Record<string, string> = {}): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-bin-"));
 	const file = path.join(dir, "unreal-agent-runner");
-	const env = `FAKE_MODE=${mode}${record ? ` FAKE_RECORD=${JSON.stringify(record)}` : ""}`;
+	const vars = { FAKE_MODE: mode, ...(record ? { FAKE_RECORD: record } : {}), ...extraEnv };
+	const env = Object.entries(vars)
+		.map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+		.join(" ");
 	fs.writeFileSync(file, `#!/bin/sh\n${env} exec bun ${JSON.stringify(path.join(import.meta.dir, "fake-runner.ts"))} "$@"\n`, { mode: 0o755 });
 	return file;
 }

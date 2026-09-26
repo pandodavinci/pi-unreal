@@ -34,6 +34,8 @@ export interface AnswerDetails {
 	/** True when the runner persisted the prompt, so Unreal's session contains this turn. */
 	delivered: boolean;
 	turnId: string;
+	/** Messages the user sent while Unreal worked on this turn, which Unreal recorded. */
+	steeredTurnIds?: string[];
 	/** The Unreal session that answered. */
 	unrealSession: string;
 	/** Host entries whose content was sent to Unreal as context with this turn. */
@@ -127,6 +129,7 @@ export function unseenContext(
 			if (!details?.delivered || (details.unrealSession ?? opts.unrealSession) !== opts.unrealSession) return;
 			seen.add(keyOf(entry, index));
 			if (details.turnId) deliveredTurns.add(details.turnId);
+			for (const id of details.steeredTurnIds ?? []) deliveredTurns.add(id);
 			for (const id of details.contextIds ?? []) seen.add(id);
 		});
 	}

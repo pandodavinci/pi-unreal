@@ -7,7 +7,7 @@
  * release's SHA256SUMS before they are made executable. The cache is keyed by version and platform, and
  * a cached binary is re-hashed on every resolve; anything that does not match is downloaded again.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -136,4 +136,30 @@ async function download(version: string, target: string, log: (msg: string) => v
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });
 	}
+}
+
+const streamInputSupport = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether this runner build reads user messages from stdin while it works (request field `stream_input`).
+ * Released runners up to v0.2.0 reject unknown request fields, so the field is only sent when the runner's
+ * help lists it. Cached per command (and per binary change, for a local build that gets rebuilt).
+ */
+export function supportsStreamInput(command: readonly string[]): Promise<boolean> {
+	let stamp = "";
+	try {
+		stamp = String(fs.statSync(command.at(-1)!).mtimeMs);
+	} catch {}
+	const key = `${JSON.stringify(command)}@${stamp}`;
+	let cached = streamInputSupport.get(key);
+	if (!cached) {
+		cached = new Promise(resolve =>
+			// The runner prints its usage (with the request fields) to stderr for -h.
+			execFile(command[0]!, [...command.slice(1), "-h"], { timeout: 10_000, encoding: "utf8" }, (_err, stdout, stderr) =>
+				resolve(/\bstream_input\b/.test(`${stdout}${stderr}`)),
+			),
+		);
+		streamInputSupport.set(key, cached);
+	}
+	return cached;
 }

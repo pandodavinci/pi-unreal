@@ -8,7 +8,9 @@
  * - Slash commands (/exit, /new, /harness, ...) and !bash still go to the host.
  * - Unreal keeps a persisted session per conversation branch, so it remembers the conversation; /new, a fork
  *   or going back with /tree starts a fresh one, seeded with the visible history.
- * - Esc cancels the running Unreal turn and the queued ones. Messages sent while it runs are queued.
+ * - Esc cancels the running Unreal turn and the queued ones. Messages sent while it runs go straight to Unreal
+ *   (runner stream_input), which reads them at its next step, even mid-command. One that arrives as the run
+ *   ends starts the next run, under the same ID so Unreal never takes it twice. Older runners queue them.
  * - Replies stream live (runner include_partial_messages) in a widget, then land in the transcript.
  * - Pasted images are saved to files and handed to Unreal's ViewImage tool by absolute path.
  *
@@ -34,12 +36,14 @@ import {
 import { inspectDotEnv } from "./env";
 import { describe } from "./events";
 import { chatModeSupported, handledInput, hostMode, isOhMyPi, safeTimers, warn, SHUTDOWN_FORCE_WAIT_MS, SHUTDOWN_GRACE_MS, withDeadline } from "./host";
-import { runnerModel, runUnreal } from "./runner";
+import { runnerModel, runUnreal, type SteerFn } from "./runner";
 import { addCancelled, imagesDir, readCancelled, readOwnership, touchChat, writeOwnership } from "./state";
 
 const WIDGET_KEY = "unreal-chat";
 const STATUS_KEY = "unreal-harness";
 const ESC_SEQUENCES = new Set(["\x1b", "\x1b[27u", "\x1b[27;1u"]);
+const NO_STEERING =
+	"This Unreal runner cannot take messages while it works, so yours waits until it finishes. A runner with stream_input (see the README) fixes that.";
 /** Cap on conversation carried over to Unreal as context. */
 const MAX_CONTEXT_CHARS = 12_000;
 const UNSUPPORTED_MODE =
@@ -136,8 +140,15 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				liveText: string;
 				liveItem: string;
 				thinking: string;
+				/** Sends a message to the running Unreal; unset until it starts, or if the runner cannot take them. */
+				send?: SteerFn;
+				/** Set once the runner reported whether it takes messages while it works. */
+				steerKnown: boolean;
+				/** Messages sent to this run while it worked. */
+				steered: Turn[];
 		  }
 		| undefined;
+	let noSteeringShown = false;
 	let ticker = false;
 	let view: LiveView | undefined;
 	let renderQueued = false;
@@ -272,7 +283,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const force = new AbortController();
 		const steps: string[] = [];
 		const startedAt = Date.now();
-		active = { turn, controller, force, startedAt, steps, liveText: "", liveItem: "", thinking: "" };
+		active = { turn, controller, force, startedAt, steps, liveText: "", liveItem: "", thinking: "", steerKnown: false, steered: [] };
 		try {
 			await processTurn(ctx, turn, active);
 		} finally {
@@ -338,6 +349,15 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			sessionId: unrealSession,
 			sessionDir: path.join(stateRoot, "sessions"),
 			includePartials: true,
+			messageId: turn.id,
+			onSteer: send => {
+				current.send = send;
+				current.steerKnown = true;
+				// Messages typed while the runner was starting go in now, in order.
+				while (queue.length && steer(queue[0]!)) queue.shift();
+				if (queue.length && !send) noteNoSteering();
+				showStatus();
+			},
 			signal: controller.signal,
 			forceSignal: force.signal,
 			debugLog: msg => debug("chat", msg),
@@ -388,7 +408,15 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		// A turn that never reached Unreal's session leaves it where it was.
 		recordOwner(result.promptPersisted ? { hostSession, headTurn: turn.id } : previousOwner);
 		// Record a cancellation before anything else, even if the answer is not added to this chat below.
-		if (result.status === "cancelled") markCancelled([turn]);
+		if (result.status === "cancelled") markCancelled([turn, ...current.steered]);
+		const recorded = new Set(result.deliveredIds);
+		const reached = current.steered.filter(steered => recorded.has(steered.id));
+		const missed = current.steered.filter(steered => !recorded.has(steered.id));
+		if (missed.length && result.status !== "cancelled") {
+			// Sent as the run was ending: they start the next run instead, with the same IDs.
+			queue.unshift(...missed);
+			steps.push(`· ${missed.length === 1 ? "your message arrived" : `${missed.length} messages arrived`} as Unreal finished: sending next`);
+		}
 		const s = result.stats;
 		const footer = [
 			result.status === "completed" ? null : result.status,
@@ -396,6 +424,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			`${s.modelCalls} model calls`,
 			`${s.toolCalls} tool calls`,
 			`${k(s.inputTokens)} in / ${k(s.outputTokens)} out`,
+			reached.length ? `+${reached.length} sent while working` : null,
 		]
 			.filter(Boolean)
 			.join(" · ");
@@ -417,6 +446,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			body,
 			delivered: result.promptPersisted,
 			turnId: turn.id,
+			steeredTurnIds: reached.map(steered => steered.id),
 			unrealSession,
 			contextIds: result.promptPersisted ? context.ids : [],
 			status: result.status,
@@ -479,14 +509,37 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		return true;
 	};
 
-	/** Show the message in the transcript and queue it for Unreal. */
+	const noteNoSteering = () => {
+		if (noSteeringShown) return;
+		noSteeringShown = true;
+		liveCtx?.ui.notify(NO_STEERING, "info");
+	};
+
+	/** Sends a turn to the running Unreal, if it takes messages and works on the same conversation. */
+	const steer = (turn: Turn): boolean => {
+		const current = active;
+		if (!current?.send || shuttingDown || !liveCtx) return false;
+		if (turn.hostSession !== current.turn.hostSession || !bubbleOnBranch(liveCtx, current.turn)) return false;
+		if (!current.send(withImages(turn.text, turn.images), turn.id)) return false;
+		current.steered.push(turn);
+		current.steps.push("· sent your message to Unreal");
+		showProgress();
+		return true;
+	};
+
+	/** Show the message in the transcript, then send it to the running Unreal, or queue it. */
 	const route = async (ctx: ExtensionContext, text: string, images: ImageContent[] | undefined) => {
 		const parentEntry = ctx.sessionManager.getLeafId();
 		const saved = images?.length ? await saveImages(images, ctx.sessionManager.getSessionId()) : [];
 		const shown = saved.length ? `${text}  [${saved.length} image${saved.length > 1 ? "s" : ""}]` : text;
 		const turnId = randomUUID();
 		post(USER_TYPE, `[User message sent to Unreal Agent, which handles it]\n${shown}`, { text: shown, turnId } satisfies UserDetails);
-		queue.push({ id: turnId, text, images: saved, hostSession: ctx.sessionManager.getSessionId(), parentEntry });
+		const turn: Turn = { id: turnId, text, images: saved, hostSession: ctx.sessionManager.getSessionId(), parentEntry };
+		// Behind messages already waiting, a message must wait too, to keep the order.
+		if (queue.length === 0 && steer(turn)) return;
+		queue.push(turn);
+		if (active?.steerKnown && !active.send) noteNoSteering();
+		showStatus();
 		void pump();
 	};
 
@@ -657,7 +710,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		ticker = false;
 		unsubscribeKeys?.();
 		unsubscribeKeys = undefined;
-		markCancelled(active ? [active.turn, ...queue] : queue);
+		markCancelled(active ? [active.turn, ...active.steered, ...queue] : queue);
 		queue.length = 0;
 		if (!active) return;
 		const current = active;

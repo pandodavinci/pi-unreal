@@ -534,3 +534,110 @@ test("promptTakenByFlag: only the argument right after --unreal, and only a mess
 	expect(promptTakenByFlag(["--", "--unreal", "x"])).toBeUndefined();
 	expect(promptTakenByFlag(["--unreal", "  "])).toBeUndefined();
 });
+
+describe("steering: messages sent while Unreal works", () => {
+	const recorded = (file: string) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
+	const turnIdOf = (host: Awaited<ReturnType<typeof setup>>, text: string) =>
+		(host.sent.find(s => s.message.customType === "unreal-you" && (s.message.details as { text: string }).text === text)!.message.details as {
+			turnId: string;
+		}).turnId;
+
+	async function steerHost(env: Record<string, string>) {
+		const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-rec-")), "prompts");
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("steer", record, { FAKE_STEER_MS: "800", ...env });
+		const host = createFakeHost({ flags: { unreal: true } });
+		piUnreal(host.pi as never);
+		await host.emit("session_start", { reason: "startup" });
+		return { host, record };
+	}
+
+	test("a message typed mid-run joins that run instead of waiting for the next", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1" });
+		await host.emit("input", { text: "run the tests", source: "interactive" });
+		await waitFor(() => recorded(record).includes("start"));
+		await host.emit("input", { text: "skip e2e", source: "interactive" });
+		await waitFor(() => answers(host).length === 1);
+		const details = answers(host)[0]!.message.details as { body: string; footer: string; steeredTurnIds: string[] };
+		expect(details.body).toEndWith("run the tests | skip e2e");
+		expect(details.footer).toContain("+1 sent while working");
+		expect(details.steeredTurnIds).toEqual([turnIdOf(host, "skip e2e")]);
+		await Bun.sleep(300);
+		expect(recorded(record).match(/^start/gm)?.length).toBe(1);
+		expect(answers(host).length).toBe(1);
+	});
+
+	test("a message the run ended without reading starts the next run, under the same ID", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_IGNORE_STDIN: "1" });
+		await host.emit("input", { text: "run the tests", source: "interactive" });
+		await waitFor(() => recorded(record).includes("start"));
+		await host.emit("input", { text: "skip e2e", source: "interactive" });
+		await waitFor(() => answers(host).length === 2);
+		const starts = recorded(record).split("\n").filter(line => line.startsWith("start"));
+		expect(starts).toHaveLength(2);
+		expect(starts[1]).toContain("skip e2e");
+		expect(starts[1]).toEndWith(`id=${turnIdOf(host, "skip e2e")}`);
+		expect((answers(host)[0]!.message.details as { steeredTurnIds: string[] }).steeredTurnIds).toEqual([]);
+	});
+
+	test("with a runner that cannot take messages, they wait for the next run and a note says why", async () => {
+		const { host, record } = await steerHost({});
+		await host.emit("input", { text: "run the tests", source: "interactive" });
+		await waitFor(() => recorded(record).includes("start"));
+		await host.emit("input", { text: "skip e2e", source: "interactive" });
+		await waitFor(() => answers(host).length === 2);
+		expect(host.notifications.filter(n => n.includes("cannot take messages while it works"))).toHaveLength(1);
+		const starts = recorded(record).split("\n").filter(line => line.startsWith("start"));
+		expect(starts).toHaveLength(2);
+		expect(starts[0]).not.toContain("skip e2e");
+		expect(starts[1]).toContain("skip e2e");
+	});
+
+	test("Esc after steering stops everything, and the sent message is never replayed", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "5000" });
+		await host.emit("input", { text: "run the tests", source: "interactive" });
+		await waitFor(() => recorded(record).includes("start"));
+		await host.emit("input", { text: "skip e2e", source: "interactive" });
+		await Bun.sleep(200);
+		expect(host.pressKey("\x1b")).toBe(true);
+		await waitFor(() => answers(host).length === 1);
+		expect(readCancelled(process.env.PI_UNREAL_STATE_DIR!).has(turnIdOf(host, "skip e2e"))).toBe(true);
+		await Bun.sleep(300);
+		expect(recorded(record).match(/^start/gm)?.length).toBe(1);
+	});
+});
+
+describe("/unreal-say", () => {
+	const recorded = (file: string) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
+
+	test("a note reaches a running background job and shows in its result", async () => {
+		const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-rec-")), "prompts");
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("steer", record, { FAKE_STEER_MS: "1000", FAKE_STREAM_INPUT: "1" });
+		const host = createFakeHost();
+		piUnreal(host.pi as never);
+		await host.emit("session_start", { reason: "startup" });
+		await host.command("unreal", "run the tests");
+		await waitFor(() => recorded(record).includes("start"));
+		await waitFor(() => {
+			host.notifications.length = 0;
+			void host.command("unreal-say", "u1 skip e2e");
+			return host.notifications.includes("Sent to unreal u1.");
+		});
+		await waitFor(() => host.sent.some(s => s.message.customType === "unreal-result"));
+		const result = host.sent.find(s => s.message.customType === "unreal-result")!;
+		expect(String(result.message.content)).toContain("ECHO:run the tests | skip e2e");
+	});
+
+	test("a runner that cannot take messages says so instead of dropping the note silently", async () => {
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("steer", undefined, { FAKE_STEER_MS: "1500" });
+		const host = createFakeHost();
+		piUnreal(host.pi as never);
+		await host.emit("session_start", { reason: "startup" });
+		await host.command("unreal", "run the tests");
+		await waitFor(() => {
+			host.notifications.length = 0;
+			void host.command("unreal-say", "skip e2e");
+			return host.notifications.some(n => !n.includes("still starting"));
+		});
+		expect(host.notifications.at(-1)).toContain("cannot take messages while it works");
+	});
+});

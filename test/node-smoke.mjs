@@ -20,7 +20,7 @@ piUnreal({
 	sendMessage: () => {},
 });
 
-assert.deepEqual(registered.commands.sort(), ["harness", "unreal", "unreal-cancel", "unreal-jobs"]);
+assert.deepEqual(registered.commands.sort(), ["harness", "unreal", "unreal-cancel", "unreal-jobs", "unreal-say"]);
 assert.deepEqual(registered.tools, ["unreal_delegate"]);
 assert.deepEqual(registered.flags, ["unreal"]);
 for (const event of ["input", "session_start", "session_shutdown"]) assert.ok(registered.events.includes(event), event);
@@ -31,6 +31,19 @@ try {
 	const result = await runUnreal({ task: "t", cwd: process.cwd(), stateDir, command: ["/nonexistent/unreal-agent-runner"] });
 	assert.equal(result.status, "crashed");
 	assert.match(result.errorMessage, /failed to spawn/);
+	// A message sent while the runner works goes through Node's child stdin (Pi runs extensions on Node).
+	// The runner's -h check and the run itself both read these from the environment.
+	Object.assign(process.env, { FAKE_MODE: "steer", FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "600" });
+	const noteId = "8d7c6b5a-4f3e-4d2c-8b1a-0f9e8d7c6b5a";
+	const steered = await runUnreal({
+		task: "run the tests",
+		cwd: process.cwd(),
+		stateDir,
+		command: ["bun", path.join(import.meta.dirname, "fake-runner.ts")],
+		onSteer: send => assert.equal(send?.("skip e2e", noteId), true),
+	});
+	assert.equal(steered.finalText, "ECHO:run the tests | skip e2e");
+	assert.ok(steered.deliveredIds.includes(noteId));
 } finally {
 	fs.rmSync(stateDir, { recursive: true, force: true });
 }

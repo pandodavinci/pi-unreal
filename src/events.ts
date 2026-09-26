@@ -5,10 +5,14 @@
  * Runner line shapes (see unreal-agent cmd/internal/agentrunner/run.go):
  *   {"Sequence":n,"Kind":"input"|"turn"|"model_response"|"tool_call_status"|...,"Data":{...}}
  *   {"type":"error","message":"..."}   (fatal, emitted once before exit 1)
+ *   {"type":"input_error","line":n,"message":"..."}   (stream_input: a stdin line was skipped)
  */
 
 export type BridgeEvent =
 	| { kind: "turn"; turnId: string }
+	/** Unreal recorded a user message in its session (the first one is the prompt). */
+	| { kind: "user_message"; id: string }
+	| { kind: "input_error"; message: string }
 	| { kind: "text"; text: string; phase: string }
 	| { kind: "reasoning"; summary: string }
 	| { kind: "tool_call"; callId: string; name: string; args: string }
@@ -72,6 +76,8 @@ export class EventMapper {
 	finalText = "";
 	/** True once the runner persisted the user's prompt (an external input item), i.e. Unreal's session has it. */
 	promptPersisted = false;
+	/** IDs of the user messages Unreal recorded, in order (the prompt, then messages sent while it worked). */
+	readonly deliveredIds: string[] = [];
 	/** Stop reason of the last model response ("complete", "max_output_tokens", "refused"), or "failed". */
 	lastStop = "";
 	#finalIsAnswer = false;
@@ -93,14 +99,23 @@ export class EventMapper {
 		if (item?.type === "error") {
 			return [{ kind: "runner_error", message: String(item.message ?? "unknown error") }];
 		}
+		if (item?.type === "input_error") {
+			return [{ kind: "input_error", message: String(item.message ?? "") }];
+		}
 		if (item?.type === "partial") {
 			const partialKind = item.kind === "text" || item.kind === "reasoning" ? item.kind : "reset";
 			return [{ kind: "partial", partialKind, itemId: String(item.item_id ?? ""), delta: String(item.delta ?? "") }];
 		}
 		switch (item?.Kind) {
-			case "input":
-				if (item.Data?.Kind === "external") this.promptPersisted = true;
-				return [];
+			case "input": {
+				if (item.Data?.Kind !== "external") return [];
+				const first = !this.promptPersisted;
+				this.promptPersisted = true;
+				const id = String(item.Data?.ID ?? "");
+				this.deliveredIds.push(id);
+				// The prompt itself is not a step worth showing.
+				return first ? [] : [{ kind: "user_message", id }];
+			}
 			case "turn":
 				return [{ kind: "turn", turnId: String(item.Data?.ID ?? "") }];
 			case "model_response":
@@ -222,6 +237,10 @@ export function describe(event: BridgeEvent): string {
 			return `! runner error: ${clip(event.message)}`;
 		case "raw":
 			return `? ${clip(event.line)}`;
+		case "user_message":
+			return "· Unreal read your message";
+		case "input_error":
+			return `! message not delivered: ${clip(event.message)}`;
 		case "partial":
 			return "";
 	}

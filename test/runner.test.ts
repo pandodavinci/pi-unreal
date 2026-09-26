@@ -4,7 +4,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { BridgeEvent } from "../src/events";
-import { explainRunnerError, runUnreal } from "../src/runner";
+import { explainRunnerError, runUnreal, type SteerFn } from "../src/runner";
+import { fakeRunnerExecutable } from "./fake-host";
 
 const FAKE = ["bun", path.join(import.meta.dir, "fake-runner.ts")];
 const tmp = () => path.join(os.tmpdir(), `omp-unreal-test-${Math.random().toString(36).slice(2)}`);
@@ -291,4 +292,60 @@ group("runUnreal: first-run experience", () => {
 		expect(result.status).toBe("crashed");
 		expect(result.errorMessage).toContain("UNREAL_AGENT_RUNNER");
 	}, 30_000);
+});
+
+group("runUnreal: messages while it works (stream_input)", () => {
+	const steerRunner = (env: Record<string, string>) => [fakeRunnerExecutable("steer", undefined, { FAKE_STEER_MS: "600", ...env })];
+	const PROMPT_ID = "5b0f4d6e-1c2a-4e8b-9f3d-7a6c5e4b3a21";
+	const NOTE_ID = "8d7c6b5a-4f3e-4d2c-8b1a-0f9e8d7c6b5a";
+
+	test("a message sent mid-run reaches Unreal and its ID is reported as recorded", async () => {
+		let send: SteerFn | undefined;
+		const result = await runUnreal({
+			task: "run the tests",
+			messageId: PROMPT_ID,
+			cwd: os.tmpdir(),
+			stateDir: tmp(),
+			command: steerRunner({ FAKE_STREAM_INPUT: "1" }),
+			onSteer: fn => {
+				send = fn;
+				expect(fn!("skip e2e", NOTE_ID)).toBe(true);
+			},
+		});
+		expect(result.status).toBe("completed");
+		expect(result.finalText).toBe("ECHO:run the tests | skip e2e");
+		expect(result.deliveredIds).toEqual([PROMPT_ID, NOTE_ID]);
+		// The run is over: nothing more can be sent.
+		expect(send!("too late", "0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f")).toBe(false);
+	});
+
+	test("a runner without stream_input is never sent the field, and takes no messages", async () => {
+		let offered: SteerFn | undefined | "not called" = "not called";
+		const result = await runUnreal({
+			task: "run the tests",
+			cwd: os.tmpdir(),
+			stateDir: tmp(),
+			// Rejects stream_input as an unknown field, like the released v0.2.0.
+			command: steerRunner({}),
+			onSteer: fn => {
+				offered = fn;
+			},
+		});
+		expect(result.status).toBe("completed");
+		expect(offered).toBeUndefined();
+		expect(result.finalText).toBe("ECHO:run the tests");
+	});
+
+	test("a message the runner never read is not reported as recorded", async () => {
+		const result = await runUnreal({
+			task: "run the tests",
+			messageId: PROMPT_ID,
+			cwd: os.tmpdir(),
+			stateDir: tmp(),
+			command: steerRunner({ FAKE_STREAM_INPUT: "1", FAKE_IGNORE_STDIN: "1" }),
+			onSteer: fn => void fn!("skip e2e", NOTE_ID),
+		});
+		expect(result.status).toBe("completed");
+		expect(result.deliveredIds).toEqual([PROMPT_ID]);
+	});
 });

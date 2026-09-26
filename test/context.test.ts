@@ -32,6 +32,16 @@ describe("unseenContext", () => {
 		expect(text).toContain("You (Unreal): noted");
 	});
 
+	test("a message sent while Unreal worked, which it recorded, is not replayed; one it missed is", () => {
+		const branch = [
+			you("y1", "t1", "run the tests"),
+			you("y2", "t2", "skip e2e"),
+			you("y3", "t3", "use port 8080"),
+			answer("a1", "t1", "done", { steeredTurnIds: ["t2"] }),
+		];
+		expect(unseenContext(branch, opts()).text).toBe("User (a message that did not reach you): use port 8080");
+	});
+
 	test("canceled turns are never replayed", () => {
 		const branch = [you("y1", "t1", "delete everything"), { id: "c1", type: "custom", customType: CANCELLED_TYPE, data: { turnIds: ["t1"] } }];
 		expect(unseenContext(branch, opts()).text).toBe("");
