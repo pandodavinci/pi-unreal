@@ -542,10 +542,10 @@ describe("steering: messages sent while Unreal works", () => {
 			turnId: string;
 		}).turnId;
 
-	async function steerHost(env: Record<string, string>) {
+	async function steerHost(env: Record<string, string>, hostOpts: Parameters<typeof createFakeHost>[0] = {}, mode = "steer") {
 		const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-unreal-rec-")), "prompts");
-		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable("steer", record, { FAKE_STEER_MS: "800", ...env });
-		const host = createFakeHost({ flags: { unreal: true } });
+		process.env.UNREAL_AGENT_RUNNER = fakeRunnerExecutable(mode, record, { FAKE_STEER_MS: "800", ...env });
+		const host = createFakeHost({ flags: { unreal: true }, ...hostOpts });
 		piUnreal(host.pi as never);
 		await host.emit("session_start", { reason: "startup" });
 		return { host, record };
@@ -637,6 +637,38 @@ describe("steering: messages sent while Unreal works", () => {
 		// Recorded as seen, so the next run does not send it again.
 		const resultEntry = host.state.branch.find(entry => (entry as { customType?: string }).customType === "unreal-result") as { id: string };
 		expect(details.contextIds).toContain(resultEntry.id);
+	});
+
+	test("a message queued while the runner starts, then removed with /tree, is never sent", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_HELP_DELAY_MS: "600" });
+		await host.emit("input", { text: "A", source: "interactive" });
+		await host.emit("input", { text: "B removed", source: "interactive" });
+		const aBubble = host.state.branch.findIndex(entry => (entry as { details?: { text?: string } }).details?.text === "A");
+		host.state.branch = host.state.branch.slice(0, aBubble + 1);
+		await waitFor(() => answers(host).length === 1);
+		await waitFor(() => host.notifications.some(n => n.includes("queued message for another branch was dropped")));
+		expect((answers(host)[0]!.message.details as { body: string }).body).toBe("ECHO:A");
+		expect(recorded(record)).not.toContain("B removed");
+	});
+
+	test("Oh My Pi's late insertion: a sent message that lands after the run ends still gets the answer", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "300" }, { asyncInsert: true, insertDelayMs: 600 });
+		await host.emit("input", { text: "A", source: "interactive" });
+		// Once A runs, send B, whose bubble lands only after the run is over.
+		await waitFor(() => recorded(record).includes("start"));
+		await host.emit("input", { text: "B", source: "interactive" });
+		await waitFor(() => answers(host).length === 1);
+		expect((answers(host)[0]!.message.details as { body: string }).body).toBe("ECHO:A | B");
+		expect(host.notifications.some(n => n.includes("belongs to another chat or branch"))).toBe(false);
+	});
+
+	test("Oh My Pi's late insertion: the next queued message waits for the answer, so Unreal's session continues", async () => {
+		const { host } = await steerHost({}, { asyncInsert: true, insertDelayMs: 300 }, "echo");
+		await host.emit("input", { text: "A", source: "interactive" });
+		await host.emit("input", { text: "C", source: "interactive" });
+		await waitFor(() => answers(host).length === 2);
+		const [first, second] = answers(host).map(a => a.message.details as { unrealSession: string; body: string });
+		expect(second!.unrealSession).toBe(first!.unrealSession);
 	});
 
 	test("Esc after steering stops everything, and the sent message is never replayed", async () => {

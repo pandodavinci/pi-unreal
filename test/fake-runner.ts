@@ -17,6 +17,8 @@ export {};
 const mode = process.env.FAKE_MODE ?? "ok";
 const streamInput = process.env.FAKE_STREAM_INPUT === "1";
 if (process.argv.includes("-h")) {
+	// FAKE_HELP_DELAY_MS: a slow start, so messages typed meanwhile wait for the runner.
+	await Bun.sleep(Number(process.env.FAKE_HELP_DELAY_MS ?? 0));
 	process.stderr.write(`Usage: unreal-agent-runner [options] 'JSON request'\n  include_partial_messages: boolean\n${streamInput ? "  stream_input: boolean\n" : ""}`);
 	process.exit(0);
 }

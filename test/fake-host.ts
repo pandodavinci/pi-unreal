@@ -31,6 +31,8 @@ export function createFakeHost(
 		mode?: FakeContext["mode"];
 		/** Append posted messages to the branch a moment later, as Oh My Pi does (async normalization). */
 		asyncInsert?: boolean;
+		/** With asyncInsert: how long a posted message takes to land (default 30ms). */
+		insertDelayMs?: number;
 	} = {},
 ) {
 	const handlers = new Map<string, Handler[]>();
@@ -85,7 +87,7 @@ export function createFakeHost(
 		sendMessage: (message: Sent["message"], options?: Sent["options"]) => {
 			sent.push({ message, options });
 			const entry = { id: `msg-${sent.length}`, type: "custom_message", ...message };
-			if (opts.asyncInsert) setTimeout(() => state.branch.push(entry), 30);
+			if (opts.asyncInsert) setTimeout(() => state.branch.push(entry), opts.insertDelayMs ?? 30);
 			else state.branch.push(entry);
 		},
 		// Like the hosts: a custom entry on the current branch, never sent to a model.

@@ -360,7 +360,8 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				current.send = send;
 				current.steerKnown = true;
 				// Messages typed while the runner was starting go in now, in order.
-				while (queue.length && steer(queue[0]!)) queue.shift();
+				// Only ones still on the branch: /tree may have removed a message while the runner started.
+				while (queue.length && liveCtx && bubbleOnBranch(liveCtx, queue[0]!) && steer(queue[0]!)) queue.shift();
 				if (queue.length && !send) noteNoSteering();
 				showStatus();
 			},
@@ -438,7 +439,9 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const body = result.finalText || (result.status === "cancelled" ? "_stopped_" : "");
 		// Different chat or branch now (/new, /resume, /tree while running): only add the answer where its
 		// question is.
-		// That includes every message Unreal read while it worked: its answer follows all of them.
+		// That includes every message Unreal read while it worked: its answer follows all of them. Oh My Pi adds
+		// posted messages a moment later, so give the last ones time to land first.
+		await untilOnBranch(turn.hostSession, reached);
 		const here = liveCtx;
 		if (!here || turn.hostSession !== here.sessionManager.getSessionId() || ![turn, ...reached].every(t => bubbleOnBranch(here, t))) {
 			liveCtx?.ui.notify(`Unreal's answer belongs to another chat or branch and was not added here (${result.status}).`, "info");
@@ -462,6 +465,23 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			steps,
 			error,
 		} satisfies AnswerDetails);
+		// The next turn picks Unreal's session from the answers on the branch, so let this one land first.
+		await untilOnBranch(turn.hostSession, [], turn.id);
+	};
+
+	/**
+	 * Waits (up to a second) until these turns' messages, and the answer to `answerTurn` if given, are on the
+	 * current branch. Oh My Pi appends posted messages asynchronously. Gives up early if the chat changes.
+	 */
+	const untilOnBranch = async (hostSession: string, turns: readonly Turn[], answerTurn?: string) => {
+		const landed = (ctx: ExtensionContext) =>
+			turns.every(t => bubbleOnBranch(ctx, t)) &&
+			(answerTurn === undefined ||
+				branchOf(ctx).some(entry => entry.customType === ANSWER_TYPE && (entry.details as Partial<AnswerDetails> | undefined)?.turnId === answerTurn));
+		const deadline = Date.now() + 1_000;
+		while (liveCtx && liveCtx.sessionManager.getSessionId() === hostSession && !landed(liveCtx) && Date.now() < deadline) {
+			await new Promise(resolve => setTimeout(resolve, 20));
+		}
 	};
 
 	/** One pump at a time: turns never overlap, including a turn's wait for its message to land. */
