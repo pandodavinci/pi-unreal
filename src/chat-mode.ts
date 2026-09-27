@@ -25,6 +25,7 @@ import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { stateRoot as resolveStateRoot } from "./binary";
 import {
 	ANSWER_TYPE,
+	arrivedSince,
 	type AnswerDetails,
 	CANCELLED_TYPE,
 	type Entry,
@@ -146,6 +147,10 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				steerKnown: boolean;
 				/** Messages sent to this run while it worked. */
 				steered: Turn[];
+				/** Host entries this run was given as context: at the start, and with each message sent to it. */
+				contextSent: Set<string>;
+				/** Context entries that went along with each message sent while it worked, by turn ID. */
+				steeredContext: Map<string, string[]>;
 		  }
 		| undefined;
 	let noSteeringShown = false;
@@ -283,7 +288,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const force = new AbortController();
 		const steps: string[] = [];
 		const startedAt = Date.now();
-		active = { turn, controller, force, startedAt, steps, liveText: "", liveItem: "", thinking: "", steerKnown: false, steered: [] };
+		active = { turn, controller, force, startedAt, steps, liveText: "", liveItem: "", thinking: "", steerKnown: false, steered: [], contextSent: new Set(), steeredContext: new Map() };
 		try {
 			await processTurn(ctx, turn, active);
 		} finally {
@@ -342,6 +347,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			cancelledTurns: readCancelled(stateRoot),
 			maxChars: MAX_CONTEXT_CHARS,
 		});
+		for (const id of context.ids) current.contextSent.add(id);
 		const done = runUnreal({
 			task: withContext(context.text, withImages(turn.text, turn.images)),
 			cwd: ctx.cwd,
@@ -432,7 +438,9 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const body = result.finalText || (result.status === "cancelled" ? "_stopped_" : "");
 		// Different chat or branch now (/new, /resume, /tree while running): only add the answer where its
 		// question is.
-		if (!liveCtx || turn.hostSession !== liveCtx.sessionManager.getSessionId() || !bubbleOnBranch(liveCtx, turn)) {
+		// That includes every message Unreal read while it worked: its answer follows all of them.
+		const here = liveCtx;
+		if (!here || turn.hostSession !== here.sessionManager.getSessionId() || ![turn, ...reached].every(t => bubbleOnBranch(here, t))) {
 			liveCtx?.ui.notify(`Unreal's answer belongs to another chat or branch and was not added here (${result.status}).`, "info");
 			return;
 		}
@@ -448,7 +456,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 			turnId: turn.id,
 			steeredTurnIds: reached.map(steered => steered.id),
 			unrealSession,
-			contextIds: result.promptPersisted ? context.ids : [],
+			contextIds: result.promptPersisted ? [...context.ids, ...reached.flatMap(t => current.steeredContext.get(t.id) ?? [])] : [],
 			status: result.status,
 			footer,
 			steps,
@@ -518,9 +526,18 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	/** Sends a turn to the running Unreal, if it takes messages and works on the same conversation. */
 	const steer = (turn: Turn): boolean => {
 		const current = active;
-		if (!current?.send || shuttingDown || !liveCtx) return false;
-		if (turn.hostSession !== current.turn.hostSession || !bubbleOnBranch(liveCtx, current.turn)) return false;
-		if (!current.send(withImages(turn.text, turn.images), turn.id)) return false;
+		const ctx = liveCtx;
+		if (!current?.send || shuttingDown || !ctx) return false;
+		// Stopping (Esc): whatever it is sent now would be canceled with it. The next run takes it.
+		if (current.controller.signal.aborted || current.force.signal.aborted) return false;
+		// Only while this is still the conversation Unreal works on: after /tree elsewhere, even back to the
+		// message it started from, the messages it already read would not be on the branch.
+		if (turn.hostSession !== current.turn.hostSession || ![current.turn, ...current.steered].every(t => bubbleOnBranch(ctx, t))) return false;
+		// What arrived since it started (a background result, say) goes along, as it would with a new run.
+		const context = arrivedSince(branchOf(ctx), current.turn.id, current.contextSent, MAX_CONTEXT_CHARS);
+		if (!current.send(withContext(context.text, withImages(turn.text, turn.images)), turn.id)) return false;
+		for (const id of context.ids) current.contextSent.add(id);
+		current.steeredContext.set(turn.id, context.ids);
 		current.steered.push(turn);
 		current.steps.push("· sent your message to Unreal");
 		showProgress();

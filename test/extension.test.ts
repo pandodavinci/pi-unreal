@@ -592,6 +592,53 @@ describe("steering: messages sent while Unreal works", () => {
 		expect(starts[1]).toContain("skip e2e");
 	});
 
+	test("after /tree back to the running message, a new message waits instead of joining the old branch's run", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "1000" });
+		await host.emit("input", { text: "A", source: "interactive" });
+		await waitFor(() => recorded(record).includes("start"));
+		await host.emit("input", { text: "B old branch", source: "interactive" });
+		// Back to A's bubble: B is no longer on the branch.
+		const aBubble = host.state.branch.findIndex(entry => (entry as { details?: { text?: string } }).details?.text === "A");
+		host.state.branch = host.state.branch.slice(0, aBubble + 1);
+		await host.emit("input", { text: "C new branch", source: "interactive" });
+		await waitFor(() => answers(host).length === 1);
+		const body = (answers(host)[0]!.message.details as { body: string }).body;
+		expect(body).toContain("C new branch");
+		expect(body).not.toContain("B old branch");
+		const starts = recorded(record).split("\n").filter(line => line.startsWith("start"));
+		expect(starts).toHaveLength(2);
+		expect(starts[1]).toContain("C new branch");
+		// A's run read B, so its answer does not land on the branch without B.
+		expect(host.notifications.some(n => n.includes("belongs to another chat or branch"))).toBe(true);
+	});
+
+	test("a message typed right after Esc is not canceled with the stopped run: it runs next", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "5000" });
+		await host.emit("input", { text: "A", source: "interactive" });
+		await waitFor(() => recorded(record).includes("start"));
+		await Bun.sleep(200);
+		expect(host.pressKey("\x1b")).toBe(true);
+		await host.emit("input", { text: "after Esc", source: "interactive" });
+		await waitFor(() => recorded(record).split("\n").filter(line => line.startsWith("start")).length === 2);
+		expect(recorded(record).split("\n").filter(line => line.startsWith("start"))[1]).toContain("after Esc");
+		expect(readCancelled(process.env.PI_UNREAL_STATE_DIR!).has(turnIdOf(host, "after Esc"))).toBe(false);
+	});
+
+	test("a background result that lands mid-run goes along with the next message sent to that run", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "1000" });
+		await host.emit("input", { text: "A", source: "interactive" });
+		await waitFor(() => recorded(record).includes("start"));
+		(host.pi as { sendMessage(message: unknown): void }).sendMessage({ customType: "unreal-result", content: "[unreal u2] missing column customer_id" });
+		await host.emit("input", { text: "fix that failure", source: "interactive" });
+		await waitFor(() => answers(host).length === 1);
+		const details = answers(host)[0]!.message.details as { body: string; contextIds: string[] };
+		expect(details.body).toContain("missing column customer_id");
+		expect(details.body).toEndWith("fix that failure");
+		// Recorded as seen, so the next run does not send it again.
+		const resultEntry = host.state.branch.find(entry => (entry as { customType?: string }).customType === "unreal-result") as { id: string };
+		expect(details.contextIds).toContain(resultEntry.id);
+	});
+
 	test("Esc after steering stops everything, and the sent message is never replayed", async () => {
 		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "5000" });
 		await host.emit("input", { text: "run the tests", source: "interactive" });

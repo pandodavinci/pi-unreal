@@ -165,3 +165,42 @@ export function unseenContext(
 	const joined = lines.join("\n\n");
 	return { text: joined.length > opts.maxChars ? `…${joined.slice(-opts.maxChars)}` : joined, ids };
 }
+
+/**
+ * What joined the branch after the user's message `sinceTurnId` while Unreal worked on it, minus the ids in
+ * `alreadySent`: background results, other extensions' messages and the host's own messages. Our chat entries
+ * are skipped: the user's messages are sent themselves, and the answers are Unreal's own.
+ */
+export function arrivedSince(
+	branch: readonly Entry[],
+	sinceTurnId: string,
+	alreadySent: ReadonlySet<string>,
+	maxChars: number,
+): { text: string; ids: string[] } {
+	const start = branch.findIndex(
+		entry => entry.customType === USER_TYPE && (entry.details as Partial<UserDetails> | undefined)?.turnId === sinceTurnId,
+	);
+	if (start < 0) return { text: "", ids: [] };
+	const lines: string[] = [];
+	const ids: string[] = [];
+	for (let index = start + 1; index < branch.length; index++) {
+		const entry = branch[index]!;
+		const id = keyOf(entry, index);
+		if (alreadySent.has(id) || entry.customType === USER_TYPE || entry.customType === ANSWER_TYPE || entry.customType === CANCELLED_TYPE) continue;
+		let line: string | undefined;
+		if (entry.type === "message" && entry.message) {
+			const { role, content } = entry.message;
+			const text = textOf(content);
+			if (text && (role === "user" || role === "assistant")) line = `${role === "user" ? "User" : "Pi"}: ${text}`;
+		} else if (entry.customType) {
+			const text = textOf(entry.content);
+			if (text) line = `[${entry.customType}] ${text}`;
+		}
+		if (line) {
+			lines.push(line);
+			ids.push(id);
+		}
+	}
+	const joined = lines.join("\n\n");
+	return { text: joined.length > maxChars ? `…${joined.slice(-maxChars)}` : joined, ids };
+}
