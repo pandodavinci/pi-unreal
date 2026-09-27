@@ -60,7 +60,12 @@ interface Turn {
 	hostSession: string;
 	/** Host entry the message followed. If the user moves to a branch without it (/tree), the turn is dropped. */
 	parentEntry: string | null;
+	/** When the message was posted (Oh My Pi adds it to the transcript a moment later). */
+	postedAt: number;
 }
+
+/** How long a posted message may take to show up in the transcript before it counts as removed. */
+const LANDING_MS = 1_000;
 
 interface LiveView {
 	requestRender(): void;
@@ -360,8 +365,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 				current.send = send;
 				current.steerKnown = true;
 				// Messages typed while the runner was starting go in now, in order.
-				// Only ones still on the branch: /tree may have removed a message while the runner started.
-				while (queue.length && liveCtx && bubbleOnBranch(liveCtx, queue[0]!) && steer(queue[0]!)) queue.shift();
+				drainIntoRun();
 				if (queue.length && !send) noteNoSteering();
 				showStatus();
 			},
@@ -564,6 +568,33 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		return true;
 	};
 
+	let drainRetry: ReturnType<typeof setTimeout> | undefined;
+	/**
+	 * Sends queued messages to the running Unreal, in order, once each is in the transcript. One that has not
+	 * landed yet is retried shortly; one still missing after LANDING_MS was removed (/tree) and is dropped.
+	 */
+	const drainIntoRun = () => {
+		while (queue.length && active?.send && liveCtx) {
+			const next = queue[0]!;
+			if (!bubbleOnBranch(liveCtx, next)) {
+				if (Date.now() - next.postedAt < LANDING_MS) {
+					drainRetry ??= setTimeout(() => {
+						drainRetry = undefined;
+						drainIntoRun();
+					}, 50);
+					return;
+				}
+				queue.shift();
+				markCancelled([next]);
+				liveCtx.ui.notify("A queued message for another branch was dropped.", "info");
+				continue;
+			}
+			if (!steer(next)) return;
+			queue.shift();
+		}
+		showStatus();
+	};
+
 	/** Show the message in the transcript, then send it to the running Unreal, or queue it. */
 	const route = async (ctx: ExtensionContext, text: string, images: ImageContent[] | undefined) => {
 		const parentEntry = ctx.sessionManager.getLeafId();
@@ -571,10 +602,11 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 		const shown = saved.length ? `${text}  [${saved.length} image${saved.length > 1 ? "s" : ""}]` : text;
 		const turnId = randomUUID();
 		post(USER_TYPE, `[User message sent to Unreal Agent, which handles it]\n${shown}`, { text: shown, turnId } satisfies UserDetails);
-		const turn: Turn = { id: turnId, text, images: saved, hostSession: ctx.sessionManager.getSessionId(), parentEntry };
+		const turn: Turn = { id: turnId, text, images: saved, hostSession: ctx.sessionManager.getSessionId(), parentEntry, postedAt: Date.now() };
 		// Behind messages already waiting, a message must wait too, to keep the order.
 		if (queue.length === 0 && steer(turn)) return;
 		queue.push(turn);
+		drainIntoRun();
 		if (active?.steerKnown && !active.send) noteNoSteering();
 		showStatus();
 		void pump();
@@ -744,6 +776,7 @@ export function registerChatMode(pi: ExtensionAPI, debug: (scope: string, msg: s
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
 		timers.clearAll();
+		clearTimeout(drainRetry);
 		ticker = false;
 		unsubscribeKeys?.();
 		unsubscribeKeys = undefined;

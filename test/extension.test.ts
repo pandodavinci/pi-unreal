@@ -662,6 +662,19 @@ describe("steering: messages sent while Unreal works", () => {
 		expect(host.notifications.some(n => n.includes("belongs to another chat or branch"))).toBe(false);
 	});
 
+	test("Oh My Pi's late insertion: messages typed while the runner starts still reach it once they land", async () => {
+		const { host, record } = await steerHost({ FAKE_STREAM_INPUT: "1", FAKE_STEER_MS: "1500" }, { asyncInsert: true, insertDelayMs: 400 });
+		await host.emit("input", { text: "A", source: "interactive" });
+		// A has landed and its runner is starting: B and C land only after the runner is ready.
+		await waitFor(() => host.state.branch.length === 1);
+		await host.emit("input", { text: "B", source: "interactive" });
+		await host.emit("input", { text: "C", source: "interactive" });
+		await waitFor(() => answers(host).length === 1);
+		expect((answers(host)[0]!.message.details as { body: string }).body).toBe("ECHO:A | B | C");
+		await Bun.sleep(300);
+		expect(recorded(record).match(/^start/gm)?.length).toBe(1);
+	});
+
 	test("Oh My Pi's late insertion: the next queued message waits for the answer, so Unreal's session continues", async () => {
 		const { host } = await steerHost({}, { asyncInsert: true, insertDelayMs: 300 }, "echo");
 		await host.emit("input", { text: "A", source: "interactive" });
